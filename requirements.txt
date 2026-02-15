@@ -1,0 +1,6 @@
+imageio==2.34.1
+mediapipe==0.10.9
+opencv-python
+numpy
+customtkinter>=5.2.2
+tkinterdnd2
