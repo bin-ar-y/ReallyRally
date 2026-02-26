@@ -69,7 +69,8 @@ MOTION_ENERGY_THRESHOLD = 0.001
 LATERAL_VELOCITY_THRESHOLD = 0.0005
 VERTICAL_VELOCITY_THRESHOLD = 0.001
 STATIONARY_ENERGY_THRESHOLD = 0.001
-SWING_RATIO_THRESHOLD = 6.0     # Minimum "Swing Quality" to consider a rally
+ARM_ENERGY_THRESHOLD = 1.2      # Loose threshold for arm swinging
+WHIP_RATIO_THRESHOLD = 1.2      # Minimum Wrist/Elbow speed ratio to verify a swing vs a run
 
 # --- Pre-Motion Detection ---
 PIXEL_DIFF_THRESHOLD = 20       # Intensity change (0-255) to consider a pixel "changed"
@@ -227,7 +228,11 @@ class FeatureEngine:
             'energy': 0.0,
             'lat_v': 0.0,
             'vert_v': 0.0,
-            'swing_ratio': 0.0
+            'action_score': 0.0,
+            'hip_vel': 0.0,
+            'whip_ratio': 0.0,
+            'arm_energy': 0.0,
+            'player_height': 0.0
         }
 
         if landmarks is None:
@@ -244,6 +249,11 @@ class FeatureEngine:
         hip_center = (curr_coords[23] + curr_coords[24]) / 2.0
         features['hip_center_x'] = hip_center[0]
         features['hip_center_y'] = hip_center[1]
+        
+        # Player Normalized Height (Nose to Ankle)
+        nose_y = curr_coords[0][1]
+        ankle_y = (curr_coords[27][1] + curr_coords[28][1]) / 2.0
+        features['player_height'] = abs(ankle_y - nose_y)
 
         if self.prev_landmarks is not None:
             # Calculate Shoulder Width (11-12) for normalization
@@ -261,18 +271,25 @@ class FeatureEngine:
             norm_velocities = velocities / shoulder_width
             
             # Swing Analysis
-            # Hip Velocity (Running)
+            # Hip Velocity (Running and Footwork)
             hip_vel = (norm_velocities[23] + norm_velocities[24]) / 2.0
+            features['hip_vel'] = hip_vel
             
             # Arm Velocity (Elbow + Wrist)
             left_arm = (norm_velocities[13] + norm_velocities[15]) / 2.0
             right_arm = (norm_velocities[14] + norm_velocities[16]) / 2.0
             arm_energy = max(left_arm, right_arm)
             
-            # Swing-to-Run Ratio
-            # High Arm, Low Hip -> High Ratio (Rally)
-            # High Arm, High Hip -> Low Ratio (Running)
-            features['swing_ratio'] = arm_energy / (hip_vel + 0.02)
+            # Whip Ratio (Wrist vs Elbow speed)
+            max_wrist = max(norm_velocities[15], norm_velocities[16])
+            max_elbow = max(norm_velocities[13], norm_velocities[14])
+            features['whip_ratio'] = max_wrist / (max_elbow + 0.01)
+            features['arm_energy'] = arm_energy
+            
+            # True Action Score
+            # High Arm + High Hip (swinging and moving) -> Rally
+            # High Arm + Low Hip (standing still and reaching down) -> Picking
+            features['action_score'] = arm_energy * (hip_vel + 0.1)
             
             # Hip Velocity for Lateral/Vertical decomposition (Raw coords)
             hip_diff = hip_center - ((self.prev_landmarks[23] + self.prev_landmarks[24]) / 2.0)
@@ -341,7 +358,11 @@ class TennisRallyProcessor:
         self.keep_clips = keep_clips
         self.progress_callback = progress_callback
         self.stop_event = stop_event
-        self.target_format = target_format # Dict with 'width', 'height', 'fps'
+        self.target_format = target_format
+        
+        # Adaptive scale boundaries
+        self.min_player_height = 0.05
+        self.max_player_height = 0.28 # Dict with 'width', 'height', 'fps'
         
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
@@ -352,6 +373,12 @@ class TennisRallyProcessor:
         self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
+        # Enforce target_format for CLI usage to prevent VFR concatenation issues
+        if self.target_format is None:
+            self.target_format = {'width': self.width, 'height': self.height, 'fps': self.fps}
+
+        self.all_frame_metrics = []
+
         print(f"Video info: {self.width}x{self.height} @ {self.fps}fps, {self.total_frames} frames")
         
         # Initialize Detectors
@@ -363,12 +390,73 @@ class TennisRallyProcessor:
             change_threshold=PIXEL_CHANGE_THRESHOLD
         )
         
+    def estimate_player_scale(self, num_samples=40):
+        """
+        Samples the video to find the median player height for this specific
+        camera setup, allowing the system to self-adapt and reject when the
+        player gets too close to the camera.
+        """
+        print(f"--- Pre-Scan: Estimating Adaptive Player Scale Geometry ---")
+        
+        if self.total_frames <= 0:
+            return
+            
+        step = max(1, self.total_frames // num_samples)
+        heights = []
+        
+        for i in range(num_samples):
+            frame_idx = i * step
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = self.cap.read()
+            if not ret: continue
+            
+            # Resize
+            h, w = frame.shape[:2]
+            target_h = 360
+            scale = target_h / float(h)
+            w_new = int(w * scale)
+            proc_frame = cv2.resize(frame, (w_new, target_h), interpolation=cv2.INTER_LINEAR)
+            
+            results = self.pose_extractor.process_frame(cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB))
+            if results.pose_landmarks:
+                lms = results.pose_landmarks.landmark
+                nose_y = lms[0].y
+                ankle_y = (lms[27].y + lms[28].y) / 2.0
+                height = abs(ankle_y - nose_y)
+                heights.append(height)
+                
+            if self.progress_callback:
+                self.progress_callback(0.05 * (i / num_samples), "Estimating Camera Scale...")
+                
+        if heights:
+            med_h = np.median(heights)
+            self.min_player_height = max(0.02, med_h * 0.15)
+            self.max_player_height = min(0.95, med_h * 1.6)
+            print(f"Camera Baseline Calibrated:")
+            print(f"  Median Height: {med_h:.3f}")
+            print(f"  Valid Stroke Range: {self.min_player_height:.3f} to {self.max_player_height:.3f}")
+        else:
+            print("Warning: Could not detect player scale during initialization. Using default bounds.")
+            self.max_player_height = 0.28
+            
+        # Rewind to the beginning for Pass 1
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, _ = self.cap.read()
+        if not ret:
+            # If rewind fails (common on some backends), reopen the stream
+            self.cap.release()
+            self.cap = cv2.VideoCapture(self.video_path)
+            
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     def scan_motion_segments(self) -> List[Tuple[int, int]]:
         """
         Pass 1: Scan video quickly to find segments with significant motion.
         Returns: List of (start_frame, end_frame) tuples.
         """
-        print(f"--- Pass 1: Global Motion Scan (Skipping {MOTION_SCAN_SKIP_FRAMES} frames) ---")
+        # First, adapt to the camera setup
+        self.estimate_player_scale()
+        
+        print(f"\n--- Pass 1: Global Motion Scan (Skipping {MOTION_SCAN_SKIP_FRAMES} frames) ---")
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
         motion_mask = []
@@ -499,6 +587,8 @@ class TennisRallyProcessor:
         Runs the extraction pipeline and returns a list of generated clip paths.
         Does NOT merge or cleanup.
         """
+        import csv
+        
         # --- Pass 1: Motion Scan ---
         motion_segments = self.scan_motion_segments()
         
@@ -532,6 +622,30 @@ class TennisRallyProcessor:
             # Analyze this specific segment
             rallies = self.analyze_segment_data(segment_data)
             all_rally_segments.extend(rallies)
+            
+        # Export Debug Data
+        if self.all_frame_metrics:
+            debug_csv = os.path.join(self.output_dir, "debug_metrics.csv")
+            try:
+                with open(debug_csv, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Frame", "Time(s)", "Arm_Energy", "Smoothed_Arm", "Hip_Vel", "Action_Score", "Whip_Ratio", "Smoothed_Whip", "Player_Height", "Valid_Pose"])
+                    for d in self.all_frame_metrics:
+                        writer.writerow([
+                            d.get('frame', 0),
+                            f"{d.get('frame', 0)/self.fps:.2f}",
+                            f"{d.get('arm_energy', 0):.4f}",
+                            f"{d.get('smoothed_arm', 0):.4f}",
+                            f"{d.get('hip_vel', 0):.4f}",
+                            f"{d.get('action_score', 0):.4f}",
+                            f"{d.get('whip_ratio', 0):.4f}",
+                            f"{d.get('smoothed_whip', 0):.4f}",
+                            f"{d.get('player_height', 0):.4f}",
+                            int(d.get('is_valid_pose', False))
+                        ])
+                print(f"[Debug] Exported intermediate telemetry to {debug_csv}")
+            except Exception as e:
+                print(f"Failed to export debug CSV: {e}")
             
         # Export
         if all_rally_segments:
@@ -637,7 +751,10 @@ class TennisRallyProcessor:
         effective_fps = self.fps / PROCESS_EVERY_N_FRAMES
         
         energies = np.array([d.get('energy', 0) for d in frame_data])
-        swings = np.array([d.get('swing_ratio', 0) for d in frame_data])
+        arm_energies = np.array([d.get('arm_energy', 0) for d in frame_data])
+        hip_vels = np.array([d.get('hip_vel', 0) for d in frame_data])
+        whips = np.array([d.get('whip_ratio', 0) for d in frame_data])
+        heights = np.array([d.get('player_height', 0) for d in frame_data])
         
         # Smooth
         window = int(effective_fps * 0.5)
@@ -645,7 +762,15 @@ class TennisRallyProcessor:
         kernel = np.ones(window)/window
         
         smoothed_energy = np.convolve(energies, kernel, mode='same')
-        smoothed_swing = np.convolve(swings, kernel, mode='same')
+        smoothed_arm = np.convolve(arm_energies, kernel, mode='same')
+        smoothed_whip = np.convolve(whips, kernel, mode='same')
+        
+        # Inject smoothed values for telemetry dump
+        for i, d in enumerate(frame_data):
+            d['smoothed_arm'] = smoothed_arm[i]
+            d['smoothed_whip'] = smoothed_whip[i]
+        
+        self.all_frame_metrics.extend(frame_data)
         
         # Determine if this WHOLE segment is a rally, or bits of it?
         # Since Pass 1 already segmented by "Motion", we might have:
@@ -687,18 +812,36 @@ class TennisRallyProcessor:
                 # print(f"  [Reject] Dur={end_idx-start_idx} frames < {min_frames} (Too Short)")
                 continue
                 
-            # Gating Logic (Swing Ratio)
-            segment_swings = smoothed_swing[start_idx:end_idx]
-            peak_swing_ratio = np.max(segment_swings)
+            # Gating Logic (Simultaneous double-check: Arm Energy, Wrist Whip, and Baseline Camera Scale)
+            segment_arms = smoothed_arm[start_idx:end_idx]
+            peak_arm_score = np.max(segment_arms)
+            segment_whips = smoothed_whip[start_idx:end_idx]
+            segment_heights = heights[start_idx:end_idx]
+            
+            valid_strokes = (
+                (segment_arms > ARM_ENERGY_THRESHOLD) &
+                (segment_whips > WHIP_RATIO_THRESHOLD) &
+                (segment_heights > self.min_player_height) & 
+                (segment_heights < self.max_player_height)
+            )
             
             segment_energies = smoothed_energy[start_idx:end_idx]
             peak_energy = np.max(segment_energies)
+            
+            segment_hips = hip_vels[start_idx:end_idx]
+            avg_hip_vel = np.mean(segment_hips)
 
-            if peak_swing_ratio < SWING_RATIO_THRESHOLD:
-                # Reject Ball Picking
-                print(f"  [Reject] Ratio={peak_swing_ratio:.2f} < {SWING_RATIO_THRESHOLD} (Dur={end_idx-start_idx})")
+            if not np.any(valid_strokes):
+                # Reject segment if it doesn't contain a frame where Arm Energy and Whip are simultaneously high
+                max_whip = np.max(segment_whips)
+                print(f"  [Reject] No frame passed double-check. (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f})")
                 continue
             
+            if avg_hip_vel < 0.1:
+                # Reject picking (standing still mostly)
+                print(f"  [Reject] AvgHip={avg_hip_vel:.2f} < 0.1 (Ball Picking/Standing)")
+                continue
+
             if peak_energy < MOTION_ENERGY_THRESHOLD * 2:
                  print(f"  [Reject] Energy={peak_energy:.5f} < {MOTION_ENERGY_THRESHOLD * 2} (Dur={end_idx-start_idx})")
                  continue
@@ -726,7 +869,7 @@ class TennisRallyProcessor:
                 end_frame=int(t_end * self.fps),
                 start_time=t_start,
                 end_time=t_end,
-                score=peak_swing_ratio
+                score=peak_arm_score
             )
             final_segments.append(segment)
             
@@ -798,13 +941,14 @@ class TennisRallyProcessor:
                     
                 cmd.extend([
                     "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                    "-video_track_timescale", "90000",
                     "-c:a", "aac",
                     clip_path
                 ])
                 
                 # Check for errors?
                 try:
-                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120)
                     if res.returncode != 0:
                         print(f"Warning: ffmpeg failed for {clip_name}. Stderr: {res.stderr.decode()}")
                     else:
