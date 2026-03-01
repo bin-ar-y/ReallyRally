@@ -2,12 +2,17 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
+import sys
 import threading
 import subprocess
 from tkinterdnd2 import TkinterDnD, DND_FILES
-from extract_rallies import TennisRallyProcessor, generate_rally_name, get_video_date
-from extract_serves import ServePracticeProcessor
-from extract_feed import FeedPracticeProcessor
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+
+from really_rally.processors.base import TennisRallyProcessor
+from really_rally.processors.serve import ServePracticeProcessor
+from really_rally.processors.feed import FeedPracticeProcessor
+from really_rally.utils.media_io import generate_rally_name, get_video_date
 
 # Set theme
 ctk.set_appearance_mode("System")
