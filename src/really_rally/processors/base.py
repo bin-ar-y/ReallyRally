@@ -4,6 +4,7 @@ import subprocess
 import threading
 import cv2
 import numpy as np
+from typing import List, Tuple, Dict, Optional
 from really_rally.core.config import *
 from really_rally.core.models import RallySegment
 from really_rally.core.vision import MotionDetector, PoseExtractor
