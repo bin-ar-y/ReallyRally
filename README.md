@@ -82,6 +82,10 @@ python3 extract_rallies.py /path/to/your/video.mp4 --split
 The tool will always create:
 - `output_folder/{VideoName}_rallies.mp4`: A single video file combining all extracted rallies (e.g., `my_match_rallies.mp4`).
 - `output_folder/rallies.csv`: CSV file identifying start/end times.
+- `output_folder/debug_metrics.csv`: Raw telemetry data for each frame.
+
+If you enable the **Telemetry Plot** option (`--plot` in CLI or checkbox in GUI):
+- `output_folder/movement_telemetry.png`: A graph showing Arm Energy, Whip Ratio, and Player Scale timelines for visual analysis of the extraction decisions.
 
 If you use `--split`, it will ALSO keep:
 - `output_folder/rallies/`: Folder containing individual `.mp4` clips.
@@ -100,9 +104,10 @@ PROCESS_EVERY_N_FRAMES = 3       # Sample every 3 frames (~20fps) to catch fast 
 ## How it Works
 1.  **Pre-Motion Detection**: Checks pixel differences first. Skips "Empty Scenes" instantly.
 2.  **Pose Extraction**: Uses Google MediaPipe to track the player's skeleton.
-3.  **Feature Analysis**: Computes `Swing-to-Run Ratio`.
-    - **Rally**: High Arm Velocity + Low Hip Velocity (Planted feet = High Ratio).
-    - **Ball Picking**: High Arm Velocity + High Hip Velocity (Running = Low Ratio).
+3.  **Feature Analysis**: Computes `Swing-to-Run Ratio` and `Player Scale`.
+    - **Baseline Rally**: High Arm Velocity + Low Hip Velocity + Normal Scale (Scale <= 0.28).
+    - **Volley Rally**: Strict High Arm Velocity + High Whip + Large Scale (Scale > 0.28).
+    - **Walking/Ball Picking**: Large Scale but low arm/whip energy, rejected automatically.
 4.  **Filtering**: Rejects segments with `Max Swing Ratio < 15.0`.
 5.  **Export**: Saves clips using FFmpeg.
 

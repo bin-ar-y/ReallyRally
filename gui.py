@@ -6,6 +6,8 @@ import threading
 import subprocess
 from tkinterdnd2 import TkinterDnD, DND_FILES
 from extract_rallies import TennisRallyProcessor, generate_rally_name, get_video_date
+from extract_serves import ServePracticeProcessor
+from extract_feed import FeedPracticeProcessor
 
 # Set theme
 ctk.set_appearance_mode("System")
@@ -25,6 +27,8 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.output_dir = os.getcwd() # Default to CWD for speed, avoids network scan
         self.is_processing = False
         self.stop_event = threading.Event()
+        self.processing_mode = tk.StringVar(value="Rally Extraction")
+        self.plot_var = tk.BooleanVar(value=False)
         
         # Enable Drag and Drop for the window
         self.drop_target_register(DND_FILES)
@@ -51,7 +55,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
         self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(2, weight=1) # File list expands
+        self.main_frame.grid_rowconfigure(3, weight=1) # File list expands
         
         # 1. Output Selection
         self.out_frame = ctk.CTkFrame(self.main_frame)
@@ -68,9 +72,32 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_select_output = ctk.CTkButton(self.out_frame, text="Browse", width=80, command=self.select_output)
         self.btn_select_output.pack(side="right", padx=10, pady=10)
 
+        # 1.5. Mode Selection
+        self.mode_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.mode_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        
+        self.lbl_mode = ctk.CTkLabel(self.mode_frame, text="Processing Mode:", font=ctk.CTkFont(weight="bold"))
+        self.lbl_mode.pack(side="left", padx=10)
+        
+        self.mode_rally = ctk.CTkRadioButton(self.mode_frame, text="Rally Extraction", variable=self.processing_mode, value="Rally Extraction")
+        self.mode_rally.pack(side="left", padx=10)
+        
+        self.mode_serve = ctk.CTkRadioButton(self.mode_frame, text="Serving Practice", variable=self.processing_mode, value="Serving Practice")
+        self.mode_serve.pack(side="left", padx=10)
+
+        self.mode_feed = ctk.CTkRadioButton(self.mode_frame, text="Multiball Training", variable=self.processing_mode, value="Multiball Training")
+        self.mode_feed.pack(side="left", padx=10)
+
+        # 1.6. Extra Options
+        self.opt_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.opt_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        
+        self.chk_plot = ctk.CTkCheckBox(self.opt_frame, text="Generate Telemetry Plot (.png)", variable=self.plot_var)
+        self.chk_plot.pack(side="left", padx=10)
+
         # 2. File Selection Header
         self.file_header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.file_header_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(10, 0))
+        self.file_header_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(10, 0))
         
         self.lbl_files = ctk.CTkLabel(self.file_header_frame, text="Input Videos (Drag & Drop Supported)", font=ctk.CTkFont(weight="bold"))
         self.lbl_files.pack(side="left")
@@ -83,7 +110,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # 3. File List (Scrollable)
         self.scroll_files = ctk.CTkScrollableFrame(self.main_frame, label_text="Files")
-        self.scroll_files.grid(row=2, column=0, sticky="nsew", padx=10, pady=10)
+        self.scroll_files.grid(row=4, column=0, sticky="nsew", padx=10, pady=10)
         
         # --- Actions Area ---
         self.action_frame = ctk.CTkFrame(self)
@@ -108,7 +135,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_stop.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
         # --- Status Footer ---
-        self.lbl_status = ctk.CTkLabel(self, text="v1.2 (DnD) - Status: Idle", anchor="w", padx=10, font=ctk.CTkFont(size=10))
+        self.lbl_status = ctk.CTkLabel(self, text="v1.3 (Serves) - Status: Idle", anchor="w", padx=10, font=ctk.CTkFont(size=10))
         self.lbl_status.grid(row=3, column=0, sticky="ew")
 
     # --- Logic ---
@@ -264,14 +291,36 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     global_frac = (i + fraction) / total_videos
                     self.log(f"[{i+1}/{total_videos}] {video_name}: {msg}", global_frac)
                 
-                processor = TennisRallyProcessor(
-                    video_path, 
-                    self.output_dir, 
-                    keep_clips=True,
-                    progress_callback=video_progress_adapter,
-                    stop_event=self.stop_event,
-                    target_format=target_format
-                ) 
+                if self.processing_mode.get() == "Serving Practice":
+                    processor = ServePracticeProcessor(
+                        video_path, 
+                        self.output_dir, 
+                        keep_clips=True,
+                        progress_callback=video_progress_adapter,
+                        stop_event=self.stop_event,
+                        target_format=target_format,
+                        generate_plot=self.plot_var.get()
+                    )
+                elif self.processing_mode.get() == "Multiball Training":
+                    processor = FeedPracticeProcessor(
+                        video_path, 
+                        self.output_dir, 
+                        keep_clips=True,
+                        progress_callback=video_progress_adapter,
+                        stop_event=self.stop_event,
+                        target_format=target_format,
+                        generate_plot=self.plot_var.get()
+                    )
+                else:
+                    processor = TennisRallyProcessor(
+                        video_path, 
+                        self.output_dir, 
+                        keep_clips=True,
+                        progress_callback=video_progress_adapter,
+                        stop_event=self.stop_event,
+                        target_format=target_format,
+                        generate_plot=self.plot_var.get()
+                    )
                 
                 clips = processor.process_video()
                 
@@ -291,9 +340,17 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 
                 first_video = self.video_files[0]
                 date_str = get_video_date(first_video)
-                output_name = f"{date_str}_Merged_Rallies.mp4"
                 
-                processor = TennisRallyProcessor(first_video, self.output_dir)
+                if self.processing_mode.get() == "Serving Practice":
+                    output_name = f"{date_str}_Merged_Serves.mp4"
+                    processor = ServePracticeProcessor(first_video, self.output_dir)
+                elif self.processing_mode.get() == "Multiball Training":
+                    output_name = f"{date_str}_Merged_Feeds.mp4"
+                    processor = FeedPracticeProcessor(first_video, self.output_dir)
+                else:
+                    output_name = f"{date_str}_Merged_Rallies.mp4"
+                    processor = TennisRallyProcessor(first_video, self.output_dir)
+                
                 merged_path = processor.merge_clips(all_clip_paths, output_name)
                 
                 if merged_path:

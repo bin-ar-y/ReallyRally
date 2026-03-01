@@ -352,17 +352,14 @@ def generate_rally_name(video_path: str) -> str:
     return f"{date_str}_{video_stem}_rally"
 
 class TennisRallyProcessor:
-    def __init__(self, video_path: str, output_dir: str, keep_clips: bool = False, progress_callback=None, stop_event=None, target_format=None):
+    def __init__(self, video_path: str, output_dir: str, keep_clips: bool = False, progress_callback=None, stop_event=None, target_format=None, generate_plot: bool = False):
         self.video_path = video_path
         self.output_dir = output_dir
         self.keep_clips = keep_clips
         self.progress_callback = progress_callback
         self.stop_event = stop_event
         self.target_format = target_format
-        
-        # Adaptive scale boundaries
-        self.min_player_height = 0.05
-        self.max_player_height = 0.28 # Dict with 'width', 'height', 'fps'
+        self.generate_plot = generate_plot
         
         self.cap = cv2.VideoCapture(video_path)
         if not self.cap.isOpened():
@@ -390,71 +387,14 @@ class TennisRallyProcessor:
             change_threshold=PIXEL_CHANGE_THRESHOLD
         )
         
-    def estimate_player_scale(self, num_samples=40):
-        """
-        Samples the video to find the median player height for this specific
-        camera setup, allowing the system to self-adapt and reject when the
-        player gets too close to the camera.
-        """
-        print(f"--- Pre-Scan: Estimating Adaptive Player Scale Geometry ---")
-        
-        if self.total_frames <= 0:
-            return
-            
-        step = max(1, self.total_frames // num_samples)
-        heights = []
-        
-        for i in range(num_samples):
-            frame_idx = i * step
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = self.cap.read()
-            if not ret: continue
-            
-            # Resize
-            h, w = frame.shape[:2]
-            target_h = 360
-            scale = target_h / float(h)
-            w_new = int(w * scale)
-            proc_frame = cv2.resize(frame, (w_new, target_h), interpolation=cv2.INTER_LINEAR)
-            
-            results = self.pose_extractor.process_frame(cv2.cvtColor(proc_frame, cv2.COLOR_BGR2RGB))
-            if results.pose_landmarks:
-                lms = results.pose_landmarks.landmark
-                nose_y = lms[0].y
-                ankle_y = (lms[27].y + lms[28].y) / 2.0
-                height = abs(ankle_y - nose_y)
-                heights.append(height)
-                
-            if self.progress_callback:
-                self.progress_callback(0.05 * (i / num_samples), "Estimating Camera Scale...")
-                
-        if heights:
-            med_h = np.median(heights)
-            self.min_player_height = max(0.02, med_h * 0.15)
-            self.max_player_height = min(0.95, med_h * 1.6)
-            print(f"Camera Baseline Calibrated:")
-            print(f"  Median Height: {med_h:.3f}")
-            print(f"  Valid Stroke Range: {self.min_player_height:.3f} to {self.max_player_height:.3f}")
-        else:
-            print("Warning: Could not detect player scale during initialization. Using default bounds.")
-            self.max_player_height = 0.28
-            
-        # Rewind to the beginning for Pass 1
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ret, _ = self.cap.read()
-        if not ret:
-            # If rewind fails (common on some backends), reopen the stream
-            self.cap.release()
-            self.cap = cv2.VideoCapture(self.video_path)
-            
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.output_folder_name = "rallies"
+        self.output_csv_name = "rallies.csv"
+        self.clip_prefix = "_rally_"
     def scan_motion_segments(self) -> List[Tuple[int, int]]:
         """
         Pass 1: Scan video quickly to find segments with significant motion.
         Returns: List of (start_frame, end_frame) tuples.
         """
-        # First, adapt to the camera setup
-        self.estimate_player_scale()
         
         print(f"\n--- Pass 1: Global Motion Scan (Skipping {MOTION_SCAN_SKIP_FRAMES} frames) ---")
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -576,7 +516,7 @@ class TennisRallyProcessor:
                 if not self.keep_clips:
                     print("Cleaning up individual clips (use --split to keep them)...")
                     import shutil
-                    rallies_dir = os.path.join(self.output_dir, "rallies")
+                    rallies_dir = os.path.join(self.output_dir, self.output_folder_name)
                     if os.path.exists(rallies_dir):
                         shutil.rmtree(rallies_dir)
         else:
@@ -644,6 +584,16 @@ class TennisRallyProcessor:
                             int(d.get('is_valid_pose', False))
                         ])
                 print(f"[Debug] Exported intermediate telemetry to {debug_csv}")
+                
+                # Plot Telemetry
+                if self.generate_plot:
+                    try:
+                        from telemetry_plotter import generate_telemetry_plot
+                        png_path = os.path.join(self.output_dir, "movement_telemetry.png")
+                        generate_telemetry_plot(self.all_frame_metrics, self.fps, png_path)
+                    except Exception as e:
+                        print(f"Failed to generate telemetry plot: {e}")
+                    
             except Exception as e:
                 print(f"Failed to export debug CSV: {e}")
             
@@ -781,10 +731,12 @@ class TennisRallyProcessor:
         # print(f"  [Segment Stats] Mean Energy: {np.mean(energies):.5f}, Max Energy: {np.max(energies):.5f}")
         
         valid_pose = np.array([d.get('is_valid_pose', False) for d in frame_data], dtype=bool)
+        heights = np.array([d.get('player_height', 0) for d in frame_data])
         
-        # Segment primarily by Valid Pose (MediaPipe tracking)
-        # We don't want to break the segment just because energy dips briefly.
-        is_rally = valid_pose
+        # Segment primarily by Valid Pose (MediaPipe tracking) AND Valid Distance
+        # We reject frames where the player is too close to the camera (height > 0.28)
+        valid_distance = (heights >= 0.05) & (heights <= 0.28)
+        is_rally = valid_pose & valid_distance
         
         # Sub-segments
         sub_gap_frames = int(GAP_MERGE_THRESHOLD_SEC * effective_fps)
@@ -797,7 +749,14 @@ class TennisRallyProcessor:
         curr_start, curr_end = segments[0]
         for i in range(1, len(segments)):
             next_start, next_end = segments[i]
-            if next_start - curr_end < sub_gap_frames:
+            
+            # Check if this gap is a tracking dropout vs an intentional out-of-bounds
+            # If the player is detected and too close in the gap, do NOT merge.
+            gap_heights = heights[curr_end:next_start]
+            gap_valid_poses = valid_pose[curr_end:next_start]
+            too_close_in_gap = np.any((gap_valid_poses) & (gap_heights > 0.28))
+            
+            if not too_close_in_gap and (next_start - curr_end < sub_gap_frames):
                 curr_end = next_end
             else:
                 merged_segments.append((curr_start, curr_end))
@@ -812,29 +771,43 @@ class TennisRallyProcessor:
                 # print(f"  [Reject] Dur={end_idx-start_idx} frames < {min_frames} (Too Short)")
                 continue
                 
-            # Gating Logic (Simultaneous double-check: Arm Energy, Wrist Whip, and Baseline Camera Scale)
+            # Gating Logic (Arm Energy, Wrist Whip, and Player Scale)
             segment_arms = smoothed_arm[start_idx:end_idx]
             peak_arm_score = np.max(segment_arms)
             segment_whips = smoothed_whip[start_idx:end_idx]
             segment_heights = heights[start_idx:end_idx]
+            max_height = np.max(segment_heights)
             
-            valid_strokes = (
+            # Valid Baseline Stroke (Scale <= 0.28)
+            valid_baseline_strokes = (
                 (segment_arms > ARM_ENERGY_THRESHOLD) &
                 (segment_whips > WHIP_RATIO_THRESHOLD) &
-                (segment_heights > self.min_player_height) & 
-                (segment_heights < self.max_player_height)
+                (segment_heights <= 0.28)
             )
             
+            # Valid Volley Stroke (Scale > 0.28) 
+            # Require higher arm energy/whip to distinguish from walking/picking balls
+            VOLLEY_ARM_THRESHOLD = max(1.5, ARM_ENERGY_THRESHOLD * 1.2)
+            VOLLEY_WHIP_THRESHOLD = max(1.2, WHIP_RATIO_THRESHOLD)
+            
+            valid_volley_strokes = (
+                (segment_arms > VOLLEY_ARM_THRESHOLD) &
+                (segment_whips > VOLLEY_WHIP_THRESHOLD) &
+                (segment_heights > 0.28)
+            )
+
             segment_energies = smoothed_energy[start_idx:end_idx]
             peak_energy = np.max(segment_energies)
             
             segment_hips = hip_vels[start_idx:end_idx]
             avg_hip_vel = np.mean(segment_hips)
 
-            if not np.any(valid_strokes):
-                # Reject segment if it doesn't contain a frame where Arm Energy and Whip are simultaneously high
+            if not (np.any(valid_baseline_strokes) or np.any(valid_volley_strokes)):
                 max_whip = np.max(segment_whips)
-                print(f"  [Reject] No frame passed double-check. (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f})")
+                if max_height > 0.28:
+                    print(f"  [Reject] Scale={max_height:.2f} > 0.28 but weak strokes (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f}). Walking to camera.")
+                else:
+                    print(f"  [Reject] No frame passed double-check. (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f})")
                 continue
             
             if avg_hip_vel < 0.1:
@@ -893,11 +866,11 @@ class TennisRallyProcessor:
         clip_paths = []
         
         # Create output folder
-        runs_dir = os.path.join(self.output_dir, "rallies")
+        runs_dir = os.path.join(self.output_dir, self.output_folder_name)
         os.makedirs(runs_dir, exist_ok=True)
         
         # CSV Export
-        csv_path = os.path.join(self.output_dir, "rallies.csv")
+        csv_path = os.path.join(self.output_dir, self.output_csv_name)
         # Use append mode if file exists? Or just overwrite?
         # For multi-video batch processing, we might be overwriting a single CSV.
         # Ideally, we'd want a separate CSV or append. 
@@ -914,7 +887,7 @@ class TennisRallyProcessor:
                 # Unique name: {VideoStem}_rally_{i+1:03d}_{uuid}.mp4
                 import uuid
                 unique_suffix = str(uuid.uuid4())[:8]
-                clip_name = f"{video_stem}_rally_{i+1:03d}_{unique_suffix}.mp4"
+                clip_name = f"{video_stem}{self.clip_prefix}{i+1:03d}_{unique_suffix}.mp4"
                 clip_path = os.path.join(runs_dir, clip_name)
                 
                 writer.writerow([video_stem, clip_name, f"{seg.start_time:.2f}", f"{seg.end_time:.2f}", f"{seg.duration:.2f}"])
@@ -963,7 +936,7 @@ class TennisRallyProcessor:
         """Merges multiple clips into one using ffmpeg concat demuxer."""
         if not clip_paths: return None
         
-        runs_dir = os.path.join(self.output_dir, "rallies")
+        runs_dir = os.path.join(self.output_dir, self.output_folder_name)
         os.makedirs(runs_dir, exist_ok=True) # Ensure it exists if we are just merging existing files
         
         list_path = os.path.join(runs_dir, "concat_list.txt")
@@ -1043,6 +1016,7 @@ def main():
     parser.add_argument("video_path", help="Path to input video file")
     parser.add_argument("--output", help="Path to output directory (default: current directory)", default=".")
     parser.add_argument("--split", action="store_true", help="Keep individual rally clips instead of just the merged video")
+    parser.add_argument("--plot", action="store_true", help="Generate movement telemetry plot (movement_telemetry.png)")
     
     args = parser.parse_args()
     
@@ -1057,7 +1031,7 @@ def main():
         
     os.makedirs(args.output, exist_ok=True)
     
-    processor = TennisRallyProcessor(args.video_path, args.output, keep_clips=args.split)
+    processor = TennisRallyProcessor(args.video_path, args.output, keep_clips=args.split, generate_plot=args.plot)
     processor.run()
 
 if __name__ == "__main__":
