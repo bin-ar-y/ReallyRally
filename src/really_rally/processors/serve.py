@@ -1,13 +1,12 @@
 import os
-import argparse
 import sys
 import numpy as np
 from typing import List, Dict
 
-from extract_rallies import (
-    TennisRallyProcessor,
-    RallySegment,
-    get_video_date,
+from really_rally.processors.base import TennisRallyProcessor
+from really_rally.core.models import RallySegment
+from really_rally.utils.media_io import get_video_date
+from really_rally.core.config import (
     MIN_RALLY_DURATION_SEC,
     GAP_MERGE_THRESHOLD_SEC,
     ARM_ENERGY_THRESHOLD,
@@ -162,27 +161,4 @@ class ServePracticeProcessor(TennisRallyProcessor):
             
         return final_segments
 
-def main():
-    parser = argparse.ArgumentParser(description="Extract tennis serves from video.")
-    parser.add_argument("video_path", help="Path to input video file")
-    parser.add_argument("--output", help="Path to output directory (default: current directory)", default=".")
-    parser.add_argument("--split", action="store_true", help="Keep individual serve clips instead of just the merged video")
-    parser.add_argument("--plot", action="store_true", help="Generate movement telemetry plot")
-    
-    args = parser.parse_args()
-    
-    if not os.path.exists(args.video_path):
-        print(f"Error: Video not found at {args.video_path}")
-        sys.exit(1)
-        
-    if args.output == ".":
-        base_name = generate_serve_name(args.video_path)
-        args.output = os.path.join(".", base_name)
-        
-    os.makedirs(args.output, exist_ok=True)
-    
-    processor = ServePracticeProcessor(args.video_path, args.output, keep_clips=args.split, generate_plot=args.plot)
-    processor.run()
 
-if __name__ == "__main__":
-    main()
