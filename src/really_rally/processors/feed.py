@@ -1,6 +1,5 @@
 import os
 import cv2
-import sys
 import numpy as np
 from typing import List, Dict
 
@@ -10,12 +9,18 @@ from really_rally.utils.media_io import get_video_date
 from really_rally.core.config import (
     MIN_RALLY_DURATION_SEC,
     GAP_MERGE_THRESHOLD_SEC,
-    ARM_ENERGY_THRESHOLD,
-    WHIP_RATIO_THRESHOLD,
     MOTION_ENERGY_THRESHOLD,
     PROCESS_EVERY_N_FRAMES,
     BOUNDARY_PADDING_SEC,
-    MIN_COURT_COVERAGE
+    MIN_COURT_COVERAGE,
+    ADAPTIVE_WINDOW_SEC,
+    ARM_ENERGY_K_MULTIPLIER,
+    MIN_ENERGY_FLOOR,
+    WHIP_RATIO_K_MULTIPLIER,
+    MIN_WHIP_FLOOR,
+    PLAYER_HEIGHT_MIN,
+    PLAYER_HEIGHT_MAX,
+    FEED_HIP_VELOCITY_MIN
 )
 
 def generate_feed_name(video_path: str) -> str:
@@ -35,8 +40,8 @@ class FeedPracticeProcessor(TennisRallyProcessor):
         self.clip_prefix = "_feed_"
         
         # Adaptive scale boundaries (Specific for feeding mode to ignore coach)
-        self.min_player_height = 0.05
-        self.max_player_height = 0.28 
+        self.min_player_height = PLAYER_HEIGHT_MIN
+        self.max_player_height = PLAYER_HEIGHT_MAX 
 
     def get_output_filename(self) -> str:
         """
@@ -51,7 +56,7 @@ class FeedPracticeProcessor(TennisRallyProcessor):
         camera setup, allowing the system to self-adapt and reject when the
         player gets too close to the camera (e.g. the coach feeding the balls).
         """
-        print(f"--- Pre-Scan (Feed Mode): Estimating Adaptive Player Scale Geometry ---")
+        print("--- Pre-Scan (Feed Mode): Estimating Adaptive Player Scale Geometry ---")
         
         if self.total_frames <= 0:
             return
@@ -87,12 +92,12 @@ class FeedPracticeProcessor(TennisRallyProcessor):
             med_h = np.median(heights)
             self.min_player_height = max(0.02, med_h * 0.15)
             self.max_player_height = min(0.95, med_h * 1.6)
-            print(f"Camera Baseline Calibrated:")
+            print("Camera Baseline Calibrated:")
             print(f"  Median Height: {med_h:.3f}")
             print(f"  Valid Stroke Range: {self.min_player_height:.3f} to {self.max_player_height:.3f}")
         else:
             print("Warning: Could not detect player scale during initialization. Using default bounds.")
-            self.max_player_height = 0.28
+            self.max_player_height = PLAYER_HEIGHT_MAX
             
         # Rewind to the beginning for Pass 1
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -137,10 +142,28 @@ class FeedPracticeProcessor(TennisRallyProcessor):
         smoothed_arm = np.convolve(arm_energies, kernel, mode='same')
         smoothed_whip = np.convolve(whips, kernel, mode='same')
         
-        # Inject smoothed values for telemetry dump
+        # Initialize Adaptive Thresholds
+        from really_rally.core.features import SelfAdaptiveThreshold
+        arm_adaptive = SelfAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, ARM_ENERGY_K_MULTIPLIER, MIN_ENERGY_FLOOR)
+        whip_adaptive = SelfAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, WHIP_RATIO_K_MULTIPLIER, MIN_WHIP_FLOOR)
+        
+        # Pre-calculate threshold arrays for the segment
+        t_arm_arr = np.zeros(n)
+        t_whip_arr = np.zeros(n)
+        
+        # Inject smoothed values for telemetry dump and update adaptive thresholds
         for i, d in enumerate(frame_data):
             d['smoothed_arm'] = smoothed_arm[i]
             d['smoothed_whip'] = smoothed_whip[i]
+            
+            arm_adaptive.update(smoothed_arm[i])
+            whip_adaptive.update(smoothed_whip[i])
+            
+            t_arm_arr[i] = arm_adaptive.get_threshold()
+            t_whip_arr[i] = whip_adaptive.get_threshold()
+            
+            d['t_arm'] = t_arm_arr[i]
+            d['t_whip'] = t_whip_arr[i]
         
         self.all_frame_metrics.extend(frame_data)
         
@@ -179,18 +202,20 @@ class FeedPracticeProcessor(TennisRallyProcessor):
             peak_arm_score = np.max(segment_arms)
             segment_whips = smoothed_whip[start_idx:end_idx]
             segment_heights = heights[start_idx:end_idx]
+            segment_t_arm = t_arm_arr[start_idx:end_idx]
+            segment_t_whip = t_whip_arr[start_idx:end_idx]
             max_height = np.max(segment_heights)
             
             # STRICT FILTER: Discard the motion if the person bounding box is huge (e.g. Coach feeding)
             valid_baseline_strokes = (
-                (segment_arms > ARM_ENERGY_THRESHOLD) &
-                (segment_whips > WHIP_RATIO_THRESHOLD) &
+                (segment_arms > segment_t_arm) &
+                (segment_whips > segment_t_whip) &
                 (segment_heights > self.min_player_height) & 
                 (segment_heights <= self.max_player_height)
             )
             
-            VOLLEY_ARM_THRESHOLD = max(1.5, ARM_ENERGY_THRESHOLD * 1.2)
-            VOLLEY_WHIP_THRESHOLD = max(1.2, WHIP_RATIO_THRESHOLD)
+            VOLLEY_ARM_THRESHOLD = np.maximum(1.5, segment_t_arm * 1.2)
+            VOLLEY_WHIP_THRESHOLD = np.maximum(1.2, segment_t_whip)
             
             valid_volley_strokes = (
                 (segment_arms > VOLLEY_ARM_THRESHOLD) &
@@ -212,9 +237,8 @@ class FeedPracticeProcessor(TennisRallyProcessor):
                     print(f"  [Feed Reject] No frame passed double-check/scale. (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f})")
                 continue
             
-            if avg_hip_vel < 0.1:
-                # Reject picking (standing still mostly)
-                print(f"  [Feed Reject] AvgHip={avg_hip_vel:.2f} < 0.1 (Ball Picking/Standing)")
+            if avg_hip_vel < FEED_HIP_VELOCITY_MIN:
+                print(f"  [Feed Reject] AvgHip={avg_hip_vel:.3f} < {FEED_HIP_VELOCITY_MIN} (Ball Picking/Standing)")
                 continue
 
             if peak_energy < MOTION_ENERGY_THRESHOLD * 2:

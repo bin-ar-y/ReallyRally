@@ -12,6 +12,7 @@ __pycache__/
 results/
 rallies/
 *.mp4
+*.MOV
 
 # R history
 .Rhistory

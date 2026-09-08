@@ -1,7 +1,7 @@
+import json
 import subprocess
 import os
 from datetime import datetime
-import sqlite3
 
 def get_video_date(video_path: str) -> str:
     """

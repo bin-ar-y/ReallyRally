@@ -91,31 +91,29 @@ If you use `--split`, it will ALSO keep:
 - `output_folder/rallies/`: Folder containing individual `.mp4` clips.
 
 ## Configuration
-You can adjust the sensitivity and constraints by editing the **CONFIGURATION** section at the top of `extract_rallies.py`.
+You can adjust the sensitivity and constraints by editing the **CONFIGURATION** section at `src/really_rally/core/config.py`.
 
-**Current Tuned Values (Swing-to-Run Ratio Logic):**
+**Current Tuned Values (Self-Adaptive Thresholding):**
 ```python
-MIN_RALLY_DURATION_SEC = 2.0     # Minimum duration to keep
-GAP_MERGE_THRESHOLD_SEC = 5.0    # Merge gaps < 5s
-SWING_RATIO_THRESHOLD = 15.0     # Minimum "Swing Quality" (Arm Vel / Hip Vel)
-PROCESS_EVERY_N_FRAMES = 3       # Sample every 3 frames (~20fps) to catch fast swings
+ADAPTIVE_WINDOW_SEC = 30.0      # Sliding window for resting baseline
+ARM_ENERGY_K_MULTIPLIER = 4.0   # Sensitivity multiplier for MAD
+WHIP_RATIO_K_MULTIPLIER = 4.0   # Sensitivity multiplier for MAD
+RALLY_MAX_STROKE_GAP_SEC = 7.0  # Max time between strokes (t_max)
 ```
 
 ## How it Works
 1.  **Pre-Motion Detection**: Checks pixel differences first. Skips "Empty Scenes" instantly.
 2.  **Pose Extraction**: Uses Google MediaPipe to track the player's skeleton.
-3.  **Feature Analysis**: Computes `Swing-to-Run Ratio` and `Player Scale`.
-    - **Baseline Rally**: High Arm Velocity + Low Hip Velocity + Normal Scale (Scale <= 0.28).
-    - **Volley Rally**: Strict High Arm Velocity + High Whip + Large Scale (Scale > 0.28).
-    - **Walking/Ball Picking**: Large Scale but low arm/whip energy, rejected automatically.
-4.  **Filtering**: Rejects segments with `Max Swing Ratio < 15.0`.
-5.  **Export**: Saves clips using FFmpeg.
+3.  **Feature Analysis**: Extracts kinematic features (Arm Energy, Whip Ratio) normalized by Torso Length to account for perspective shifts.
+4.  **Self-Adaptive Thresholding**: Maintains a 30-second rolling buffer of resting states using statistical Median and Median Absolute Deviation (MAD) to adjust action thresholds dynamically based on the current camera layout.
+5.  **State Machine Logic**: Detects rallies using a 3-State Temporal Logic gate (Idle -> Potential Rally -> Active Rally). Rallies are kept alive if consecutive strokes are detected within a 7.0-second timeout.
+6.  **Export**: Saves segments and clips using FFmpeg.
 
 ## Troubleshooting
 - **Rallies missed?** 
-    - Lower `SWING_RATIO_THRESHOLD` (e.g., to 10.0 or 8.0).
+    - Decrease `ARM_ENERGY_K_MULTIPLIER` (e.g., to 3.0) or increase `RALLY_MAX_STROKE_GAP_SEC`.
 - **Ball picking included?** 
-    - Raise `SWING_RATIO_THRESHOLD` (e.g., to 20.0).
+    - Increase `ARM_ENERGY_K_MULTIPLIER` (e.g., to 5.0) to make the threshold more strict against noise.
 - **MediaPipe Import Error?**
     - Ensure you have installed `mediapipe<0.11.0`. Newer versions (0.11+) have changed the API structure.
     - The script includes a check for this and will suggest fixes if it fails.

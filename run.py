@@ -1,8 +1,8 @@
+"""Backwards-compatible CLI launcher. Prefer `really-rally` after pip install."""
 import os
 import sys
 
-# Ensure src directory is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from really_rally.cli import main
 

@@ -1,0 +1,3 @@
+[console_scripts]
+really-rally = really_rally.cli:main
+really-rally-gui = really_rally.gui:main

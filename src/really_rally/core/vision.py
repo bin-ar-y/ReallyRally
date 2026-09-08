@@ -1,5 +1,4 @@
 import cv2
-import numpy as np
 import mediapipe as mp
 from typing import Optional
 from really_rally.core.config import *

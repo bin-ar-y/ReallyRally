@@ -1,15 +1,15 @@
 import os
 import csv
 import subprocess
-import threading
 import cv2
 import numpy as np
 from typing import List, Tuple, Dict, Optional
 from really_rally.core.config import *
+from really_rally.core.features import RobustAdaptiveThreshold, RollingZScoreNormalizer
 from really_rally.core.models import RallySegment
 from really_rally.core.vision import MotionDetector, PoseExtractor
 from really_rally.core.features import MovementTracker, FeatureEngine
-from really_rally.utils.media_io import generate_rally_name, get_video_date
+from really_rally.utils.media_io import generate_rally_name
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -52,6 +52,16 @@ class TennisRallyProcessor:
         self.output_folder_name = "rallies"
         self.output_csv_name = "rallies.csv"
         self.clip_prefix = "_rally_"
+
+        # Global Adaptive Thresholds (persist across motion segments)
+        effective_fps = self.fps / PROCESS_EVERY_N_FRAMES
+        self.arm_adaptive = RobustAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, ARM_ENERGY_K_MULTIPLIER, MIN_ENERGY_FLOOR)
+        self.whip_adaptive = RobustAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, WHIP_RATIO_K_MULTIPLIER, MIN_WHIP_FLOOR)
+        self.last_segment_end_frame = 0  # Track end of previous segment for rest-gap padding
+    def get_output_filename(self) -> str:
+        base_name = generate_rally_name(self.video_path)
+        return f"{base_name}.mp4"
+
     def scan_motion_segments(self) -> List[Tuple[int, int]]:
         """
         Pass 1: Scan video quickly to find segments with significant motion.
@@ -189,7 +199,6 @@ class TennisRallyProcessor:
         Runs the extraction pipeline and returns a list of generated clip paths.
         Does NOT merge or cleanup.
         """
-        import csv
         
         # --- Pass 1: Motion Scan ---
         motion_segments = self.scan_motion_segments()
@@ -231,17 +240,19 @@ class TennisRallyProcessor:
             try:
                 with open(debug_csv, "w", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Frame", "Time(s)", "Arm_Energy", "Smoothed_Arm", "Hip_Vel", "Action_Score", "Whip_Ratio", "Smoothed_Whip", "Player_Height", "Valid_Pose"])
+                    writer.writerow(["Frame", "Time(s)", "Arm_Energy", "Smoothed_Arm", "T_Arm", "Hip_Vel", "Action_Score", "Whip_Ratio", "Smoothed_Whip", "T_Whip", "Player_Height", "Valid_Pose"])
                     for d in self.all_frame_metrics:
                         writer.writerow([
                             d.get('frame', 0),
                             f"{d.get('frame', 0)/self.fps:.2f}",
                             f"{d.get('arm_energy', 0):.4f}",
                             f"{d.get('smoothed_arm', 0):.4f}",
+                            f"{d.get('t_arm', 0):.4f}",
                             f"{d.get('hip_vel', 0):.4f}",
                             f"{d.get('action_score', 0):.4f}",
                             f"{d.get('whip_ratio', 0):.4f}",
                             f"{d.get('smoothed_whip', 0):.4f}",
+                            f"{d.get('t_whip', 0):.4f}",
                             f"{d.get('player_height', 0):.4f}",
                             int(d.get('is_valid_pose', False))
                         ])
@@ -250,7 +261,7 @@ class TennisRallyProcessor:
                 # Plot Telemetry
                 if self.generate_plot:
                     try:
-                        from telemetry_plotter import generate_telemetry_plot
+                        from really_rally.utils.telemetry import generate_telemetry_plot
                         png_path = os.path.join(self.output_dir, "movement_telemetry.png")
                         generate_telemetry_plot(self.all_frame_metrics, self.fps, png_path)
                     except Exception as e:
@@ -362,12 +373,46 @@ class TennisRallyProcessor:
         
         effective_fps = self.fps / PROCESS_EVERY_N_FRAMES
         
+        # Pad the global adaptive buffers with zeros for the rest gap
+        # between the previous segment's end and this segment's start.
+        # This ensures the 30s window reflects real rest time, keeping
+        # the median low and the threshold stable.
+        first_frame = frame_data[0].get('frame', 0)
+        gap_frames = max(0, first_frame - self.last_segment_end_frame)
+        gap_samples = int(gap_frames / PROCESS_EVERY_N_FRAMES)
+        # Cap to window capacity so we don't loop millions of times
+        pad_count = min(gap_samples, self.arm_adaptive.capacity)
+        if pad_count > 0:
+            self.arm_adaptive.extend_padding(0.0, pad_count)
+            self.whip_adaptive.extend_padding(0.0, pad_count)
+        
+        # Use class-level global adaptive thresholds
+        arm_adaptive = self.arm_adaptive
+        whip_adaptive = self.whip_adaptive
+
         energies = np.array([d.get('energy', 0) for d in frame_data])
         arm_energies = np.array([d.get('arm_energy', 0) for d in frame_data])
         hip_vels = np.array([d.get('hip_vel', 0) for d in frame_data])
         whips = np.array([d.get('whip_ratio', 0) for d in frame_data])
         heights = np.array([d.get('player_height', 0) for d in frame_data])
         
+        # Outlier Mitigation: Cap extreme noise spikes before smoothing
+        def mitigate_outliers(arr, absolute_max):
+            if len(arr) == 0: return arr
+            arr_capped = np.clip(arr, 0, absolute_max)
+            active_vals = arr_capped[arr_capped > 0.1]
+            if len(active_vals) > 5:
+                median = np.median(active_vals)
+                mad = np.median(np.abs(active_vals - median))
+                if mad > 0.01:
+                    dynamic_cap = median + 6 * mad 
+                    dynamic_cap = max(dynamic_cap, 1.0) 
+                    arr_capped = np.clip(arr_capped, 0, dynamic_cap)
+            return arr_capped
+
+        arm_energies = mitigate_outliers(arm_energies, absolute_max=4.0)
+        whips = mitigate_outliers(whips, absolute_max=25.0)
+
         # Smooth
         window = int(effective_fps * 0.5)
         if window < 1: window = 1
@@ -377,137 +422,126 @@ class TennisRallyProcessor:
         smoothed_arm = np.convolve(arm_energies, kernel, mode='same')
         smoothed_whip = np.convolve(whips, kernel, mode='same')
         
-        # Inject smoothed values for telemetry dump
-        for i, d in enumerate(frame_data):
-            d['smoothed_arm'] = smoothed_arm[i]
-            d['smoothed_whip'] = smoothed_whip[i]
-        
-        self.all_frame_metrics.extend(frame_data)
-        
-        # Determine if this WHOLE segment is a rally, or bits of it?
-        # Since Pass 1 already segmented by "Motion", we might have:
-        # [Walk -> Rally -> Walk].
-        # We need to sub-segment "Play" vs "Non-Play" inside this block using Energy/Swing.
-        
-        # Debug Stats (Commented out)
-        # print(f"  [Segment Stats] Mean Energy: {np.mean(energies):.5f}, Max Energy: {np.max(energies):.5f}")
-        
-        valid_pose = np.array([d.get('is_valid_pose', False) for d in frame_data], dtype=bool)
-        heights = np.array([d.get('player_height', 0) for d in frame_data])
-        
-        # Segment primarily by Valid Pose (MediaPipe tracking) AND Valid Distance
-        # We reject frames where the player is too close to the camera (height > 0.28)
-        valid_distance = (heights >= 0.05) & (heights <= 0.28)
-        is_rally = valid_pose & valid_distance
-        
-        # Sub-segments
-        sub_gap_frames = int(GAP_MERGE_THRESHOLD_SEC * effective_fps)
-        segments = self._mask_to_indices(is_rally.astype(int))
-        
-        # Merge
-        merged_segments = []
-        if not segments: return []
-        
-        curr_start, curr_end = segments[0]
-        for i in range(1, len(segments)):
-            next_start, next_end = segments[i]
-            
-            # Check if this gap is a tracking dropout vs an intentional out-of-bounds
-            # If the player is detected and too close in the gap, do NOT merge.
-            gap_heights = heights[curr_end:next_start]
-            gap_valid_poses = valid_pose[curr_end:next_start]
-            too_close_in_gap = np.any((gap_valid_poses) & (gap_heights > 0.28))
-            
-            if not too_close_in_gap and (next_start - curr_end < sub_gap_frames):
-                curr_end = next_end
-            else:
-                merged_segments.append((curr_start, curr_end))
-                curr_start, curr_end = next_start, next_end
-        merged_segments.append((curr_start, curr_end))
+        # Z-score normalization: produce source-agnostic signals so that
+        # the adaptive thresholds operate on unitless "standard deviations
+        # above the local mean" rather than absolute kinematic values.
+        z_normalizer_arm = RollingZScoreNormalizer(ADAPTIVE_WINDOW_SEC, effective_fps)
+        z_normalizer_whip = RollingZScoreNormalizer(ADAPTIVE_WINDOW_SEC, effective_fps)
+        z_arm = z_normalizer_arm.normalize_array(smoothed_arm)
+        z_whip = z_normalizer_whip.normalize_array(smoothed_whip)
         
         final_segments = []
-        min_frames = int(MIN_RALLY_DURATION_SEC * effective_fps)
         
-        for start_idx, end_idx in merged_segments:
-            if (end_idx - start_idx) < min_frames:
-                # print(f"  [Reject] Dur={end_idx-start_idx} frames < {min_frames} (Too Short)")
-                continue
-                
-            # Gating Logic (Arm Energy, Wrist Whip, and Player Scale)
-            segment_arms = smoothed_arm[start_idx:end_idx]
-            peak_arm_score = np.max(segment_arms)
-            segment_whips = smoothed_whip[start_idx:end_idx]
-            segment_heights = heights[start_idx:end_idx]
-            max_height = np.max(segment_heights)
+        # ---- State Machine Initial Variables ----
+        # State 0 (Idle), State 1 (Potential Rally), State 2 (Active Rally)
+        state = 0
+        rally_start_time = 0.0
+        rally_start_frame = 0
+        last_stroke_time = 0.0
+        peak_score = 0.0
+        
+        for i, d in enumerate(frame_data):
+            # Inject smoothed values for telemetry dump (raw, human-readable)
+            d['smoothed_arm'] = smoothed_arm[i]
+            d['smoothed_whip'] = smoothed_whip[i]
             
-            # Valid Baseline Stroke (Scale <= 0.28)
-            valid_baseline_strokes = (
-                (segment_arms > ARM_ENERGY_THRESHOLD) &
-                (segment_whips > WHIP_RATIO_THRESHOLD) &
-                (segment_heights <= 0.28)
-            )
+            # Update Adaptive Buffers with Z-scored values & Get Thresholds.
+            # The Z-scored signal is unitless ("std devs above local mean"),
+            # so thresholds are now source-agnostic.
+            arm_adaptive.update(z_arm[i])
+            whip_adaptive.update(z_whip[i])
             
-            # Valid Volley Stroke (Scale > 0.28) 
-            # Require higher arm energy/whip to distinguish from walking/picking balls
-            VOLLEY_ARM_THRESHOLD = max(1.5, ARM_ENERGY_THRESHOLD * 1.2)
-            VOLLEY_WHIP_THRESHOLD = max(1.2, WHIP_RATIO_THRESHOLD)
+            t_arm = arm_adaptive.get_threshold()
+            t_whip = whip_adaptive.get_threshold()
             
-            valid_volley_strokes = (
-                (segment_arms > VOLLEY_ARM_THRESHOLD) &
-                (segment_whips > VOLLEY_WHIP_THRESHOLD) &
-                (segment_heights > 0.28)
-            )
+            # Save thresholds in dict for debug export
+            d['t_arm'] = t_arm
+            d['t_whip'] = t_whip
+            d['z_arm'] = z_arm[i]
+            d['z_whip'] = z_whip[i]
+            
+            # Gating Logic
+            is_valid_pose = d.get('is_valid_pose', False)
+            scale = d.get('player_height', 0)
+            valid_distance = (scale >= PLAYER_HEIGHT_MIN) and (scale <= PLAYER_HEIGHT_MAX)
 
-            segment_energies = smoothed_energy[start_idx:end_idx]
-            peak_energy = np.max(segment_energies)
+            # Stroke Condition: use Z-scored signals against adaptive thresholds
+            is_stroke = False
+            if is_valid_pose and valid_distance:
+                if z_arm[i] > t_arm and z_whip[i] > t_whip:
+                    if hip_vels[i] > HIP_VELOCITY_STROKE_THRESHOLD and d.get('spatial_variance', 1.0) >= SPATIAL_VARIANCE_STROKE_MIN:
+                        is_stroke = True
+                        
+            current_time = d.get('timestamp', 0.0)
+            current_frame = d.get('frame', 0)
             
-            segment_hips = hip_vels[start_idx:end_idx]
-            avg_hip_vel = np.mean(segment_hips)
-
-            if not (np.any(valid_baseline_strokes) or np.any(valid_volley_strokes)):
-                max_whip = np.max(segment_whips)
-                if max_height > 0.28:
-                    print(f"  [Reject] Scale={max_height:.2f} > 0.28 but weak strokes (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f}). Walking to camera.")
+            # --- State Machine transitions ---
+            if state == 0:
+                if is_stroke:
+                    # Transition to State 1
+                    state = 1
+                    rally_start_time = max(0.0, current_time - BOUNDARY_PADDING_SEC)
+                    rally_start_frame = max(0, current_frame - int(BOUNDARY_PADDING_SEC * self.fps))
+                    last_stroke_time = current_time
+                    peak_score = smoothed_arm[i]
+                    
+            elif state == 1:
+                # Waiting for 2nd stroke within t_max
+                if is_stroke:
+                    if (current_time - last_stroke_time) > 0.5: # Prevent same stroke double-triggering
+                        state = 2 # Rally confirmed
+                        last_stroke_time = current_time
+                        peak_score = max(peak_score, smoothed_arm[i])
                 else:
-                    print(f"  [Reject] No frame passed double-check. (Peak Arm: {peak_arm_score:.2f}, Peak Whip: {max_whip:.2f})")
-                continue
-            
-            if avg_hip_vel < 0.1:
-                # Reject picking (standing still mostly)
-                print(f"  [Reject] AvgHip={avg_hip_vel:.2f} < 0.1 (Ball Picking/Standing)")
-                continue
+                    if (current_time - last_stroke_time) > RALLY_MAX_STROKE_GAP_SEC:
+                        # Timeout, back to idle
+                        state = 0
+                        
+            elif state == 2:
+                # Active Rally
+                if is_stroke:
+                    last_stroke_time = current_time
+                    peak_score = max(peak_score, smoothed_arm[i])
+                else:
+                    if (current_time - last_stroke_time) > RALLY_MAX_STROKE_GAP_SEC:
+                        # Rally Ends. Save segment.
+                        rally_end_time = min(self.total_frames / self.fps, last_stroke_time + BOUNDARY_PADDING_SEC)
+                        rally_end_frame = int(rally_end_time * self.fps)
+                        
+                        duration = rally_end_time - rally_start_time
+                        if duration >= MIN_RALLY_DURATION_SEC:
+                            segment = RallySegment(
+                                start_frame=rally_start_frame,
+                                end_frame=rally_end_frame,
+                                start_time=rally_start_time,
+                                end_time=rally_end_time,
+                                score=peak_score
+                            )
+                            final_segments.append(segment)
+                            
+                        # Reset to idle
+                        state = 0
+                        
+        # Handle trailing rally if video ends while in State 2
+        if state == 2:
+            rally_end_time = min(self.total_frames / self.fps, last_stroke_time + BOUNDARY_PADDING_SEC)
+            rally_end_frame = int(rally_end_time * self.fps)
+            if (rally_end_time - rally_start_time) >= MIN_RALLY_DURATION_SEC:
+                segment = RallySegment(
+                    start_frame=rally_start_frame,
+                    end_frame=rally_end_frame,
+                    start_time=rally_start_time,
+                    end_time=rally_end_time,
+                    score=peak_score
+                )
+                final_segments.append(segment)
 
-            if peak_energy < MOTION_ENERGY_THRESHOLD * 2:
-                 print(f"  [Reject] Energy={peak_energy:.5f} < {MOTION_ENERGY_THRESHOLD * 2} (Dur={end_idx-start_idx})")
-                 continue
-
-            # Feeder Rejection Logic
-            segment_variances = [d.get('spatial_variance', 0) for d in frame_data[start_idx:end_idx]]
-            max_variance = np.max(segment_variances) if segment_variances else 0
-            
-            if max_variance < MIN_COURT_COVERAGE:
-                 print(f"  [Reject] Stationary Feeder. Variance={max_variance:.3f} < {MIN_COURT_COVERAGE}")
-                 continue
-                 
-            # Map back to original timestamps
-            # indexes start_idx, end_idx are relative to frame_data list
-            # frame_data[start_idx] contains 'timestamp' and 'frame'
-            
-            start_feat = frame_data[start_idx]
-            end_feat = frame_data[end_idx-1] # inclusive?
-            
-            t_start = max(0, start_feat['timestamp'] - BOUNDARY_PADDING_SEC)
-            t_end = min(self.total_frames / self.fps, end_feat['timestamp'] + BOUNDARY_PADDING_SEC)
-            
-            segment = RallySegment(
-                start_frame=int(t_start * self.fps),
-                end_frame=int(t_end * self.fps),
-                start_time=t_start,
-                end_time=t_end,
-                score=peak_arm_score
-            )
-            final_segments.append(segment)
-            
+        self.all_frame_metrics.extend(frame_data)
+        
+        # Update last_segment_end_frame for next segment's rest-gap calculation
+        if frame_data:
+            self.last_segment_end_frame = frame_data[-1].get('frame', 0)
+        
         return final_segments
     def _mask_to_segments(self, mask):
         """Helper to convert boolean mask to start/end indices"""
@@ -523,7 +557,6 @@ class TennisRallyProcessor:
 
     def export_clips(self, segments: List[RallySegment]) -> List[str]:
         """Export clips using ffmpeg. Returns list of output paths."""
-        import csv
         
         clip_paths = []
         
