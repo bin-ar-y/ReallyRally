@@ -7,6 +7,8 @@ from typing import List, Tuple, Dict, Optional
 from really_rally.core.config import *
 from really_rally.core.features import RobustAdaptiveThreshold, RollingZScoreNormalizer
 from really_rally.core.candidate import CoarseCandidateDetector, RallyStateMachine
+from really_rally.core.objects import BallTracker, racket_near_hand
+from really_rally.core.fusion import EvidenceFusion, RallyEvidence
 from really_rally.core.models import RallySegment
 from really_rally.core.vision import MotionDetector, get_pose_extractor
 from really_rally.core.features import MovementTracker, FeatureEngine
@@ -46,6 +48,9 @@ class TennisRallyProcessor:
         
         # Initialize Detectors
         self.pose_extractor = get_pose_extractor()
+        # Object verification backend. Null by default, so the pose-only
+        # pipeline is unchanged until a real detector is configured.
+        self.object_detector = self._build_object_detector()
         # Pass 1 Detector (Robust)
         self.motion_detector = MotionDetector(
             self.width, self.height, 
@@ -62,6 +67,16 @@ class TennisRallyProcessor:
         self.arm_adaptive = RobustAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, ARM_ENERGY_K_MULTIPLIER, MIN_ENERGY_FLOOR)
         self.whip_adaptive = RobustAdaptiveThreshold(ADAPTIVE_WINDOW_SEC, effective_fps, WHIP_RATIO_K_MULTIPLIER, MIN_WHIP_FLOOR)
         self.last_segment_end_frame = 0  # Track end of previous segment for rest-gap padding
+    def _build_object_detector(self):
+        """Build the object-verification backend.
+
+        Returns a null detector unless a real implementation is registered via
+        ``really_rally.core.objects.register_object_detector``. This keeps the
+        heavy inference dependency optional and the default path pose-only.
+        """
+        from really_rally.core.objects import get_object_detector
+        return get_object_detector()
+
     def get_output_filename(self) -> str:
         base_name = generate_rally_name(self.video_path)
         return f"{base_name}.mp4"
@@ -170,6 +185,130 @@ class TennisRallyProcessor:
         ends = np.where(diffs == -1)[0]
         return list(zip(starts, ends))
 
+    # ---------------------------------------------------------------- Pass 3
+    def verify_candidate_windows(self, segments: List[RallySegment]) -> List[RallySegment]:
+        """Re-score rally segments with object evidence from candidate windows.
+
+        Object inference is expensive, so it runs only inside the windows the
+        cheap stage already proposed — never over the whole video. A window is
+        a segment padded by OBJECT_WINDOW_PAD_SEC, and frames are downscaled to
+        OBJECT_INFERENCE_LONG_SIDE before inference.
+
+        A segment is kept unless fusion rejects it. Because the shipped backend
+        is a null detector this method returns its input unchanged; it exists
+        so the wiring, telemetry and ablation are in place for a real model.
+        """
+        if not self.object_detector.provides_evidence:
+            return segments
+
+        fusion = EvidenceFusion()
+        tracker = BallTracker()
+        kept: List[RallySegment] = []
+
+        metrics_by_frame = {d.get('frame'): d for d in self.all_frame_metrics}
+        pad_frames = int(OBJECT_WINDOW_PAD_SEC * self.fps)
+
+        for seg in segments:
+            if self.stop_event and self.stop_event.is_set():
+                break
+
+            start = max(0, seg.start_frame - pad_frames)
+            end = min(self.total_frames - 1, seg.end_frame + pad_frames)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+
+            tracker.reset()
+            racket_frames = near_hand_frames = frames_checked = 0
+            ball_frames = 0
+            ball_conf = 0.0
+
+            frame_idx = start
+            while frame_idx <= end:
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+                if frame_idx % PROCESS_EVERY_N_FRAMES:
+                    frame_idx += 1
+                    continue
+
+                objs = self.object_detector.detect(self._downscale_for_inference(frame), frame_idx)
+                if objs.available:
+                    frames_checked += 1
+                    if objs.best_racket is not None:
+                        racket_frames += 1
+                        wrist = self._dominant_wrist(metrics_by_frame.get(frame_idx))
+                        if wrist and racket_near_hand(objs.best_racket, wrist):
+                            near_hand_frames += 1
+                    if objs.balls:
+                        ball_frames += 1
+                        tracker.update(frame_idx, objs.balls)
+                        ball_conf = max(ball_conf, tracker.confidence(frame_idx))
+
+                frame_idx += 1
+
+            pose_score = self._pose_score_for_segment(seg)
+            evidence = RallyEvidence(
+                pose_score=pose_score,
+                racket_score=fusion.score_racket(racket_frames, frames_checked, near_hand_frames),
+                ball_score=fusion.score_ball(ball_conf, ball_frames, frames_checked),
+                temporal_score=self._temporal_score_for_segment(seg),
+            )
+            seg.score = fusion.fuse(evidence)
+            seg.evidence = evidence
+
+            if fusion.accept(evidence):
+                kept.append(seg)
+            else:
+                print(f"  [Verify] Rejected segment @ {seg.start_time:.1f}s "
+                      f"(confidence {seg.score:.2f})")
+
+        return kept
+
+    def _downscale_for_inference(self, frame):
+        h, w = frame.shape[:2]
+        scale = OBJECT_INFERENCE_LONG_SIDE / float(max(h, w))
+        if scale >= 1.0:
+            return frame
+        return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+
+    @staticmethod
+    def _dominant_wrist(feats: Optional[Dict]):
+        """Wrist position of whichever arm moved more in this frame."""
+        if not feats:
+            return None
+        left = feats.get('l_wrist_vel', 0.0)
+        right = feats.get('r_wrist_vel', 0.0)
+        if left >= right:
+            return (feats.get('l_wrist_x', 0.0), feats.get('l_wrist_y', 0.0))
+        return (feats.get('r_wrist_x', 0.0), feats.get('r_wrist_y', 0.0))
+
+    def _pose_score_for_segment(self, seg: RallySegment) -> float:
+        """Normalized peak coarse score within the segment, as pose evidence."""
+        vals = [
+            d.get('coarse_score', 0.0) for d in self.all_frame_metrics
+            if seg.start_frame <= d.get('frame', 0) <= seg.end_frame
+        ]
+        if not vals:
+            return 0.5
+        peak = max(vals)
+        max_possible = COARSE_W_ARM + COARSE_W_WHIP + COARSE_W_HIP + COARSE_W_SPATIAL
+        return min(1.0, peak / max_possible)
+
+    def _temporal_score_for_segment(self, seg: RallySegment) -> float:
+        """How many distinct candidate strokes the segment contains.
+
+        A single isolated burst is weak evidence; a repeated stroke sequence is
+        the structure that distinguishes a rally from one-off movement.
+        """
+        frames = [
+            d for d in self.all_frame_metrics
+            if seg.start_frame <= d.get('frame', 0) <= seg.end_frame
+        ]
+        if not frames:
+            return 0.5
+        mask = [bool(d.get('candidate', 0)) for d in frames]
+        strokes = sum(1 for i, v in enumerate(mask) if v and (i == 0 or not mask[i - 1]))
+        return min(1.0, strokes / 4.0)
+
     def run(self):
         """
         Main execution pipeline.
@@ -237,7 +376,14 @@ class TennisRallyProcessor:
             # Analyze this specific segment
             rallies = self.analyze_segment_data(segment_data)
             all_rally_segments.extend(rallies)
-            
+
+        # --- Pass 3 (optional): object verification inside candidate windows ---
+        # Runs only when a real detector is configured; the default null
+        # backend makes this a no-op so pose-only behaviour is unchanged.
+        if self.object_detector.provides_evidence and all_rally_segments:
+            all_rally_segments = self.verify_candidate_windows(all_rally_segments)
+
+
         # Export Debug Data
         if self.all_frame_metrics:
             debug_csv = os.path.join(self.output_dir, "debug_metrics.csv")

@@ -74,6 +74,26 @@ COARSE_CANDIDATE_THRESHOLD = 2.0
 COARSE_MIN_ABS_ARM = 0.005
 COARSE_MIN_ABS_WHIP = 0.3
 
+# --- Object Detection (racket + ball verification) ---
+# Object evidence is SUPPORTING, never an absolute gate. Detectors run only
+# inside candidate windows, never over a whole video.
+RACKET_HAND_MAX_DIST_NORM = 0.15   # wrist-to-racket-box distance (bbox-normalized)
+BALL_TRACK_GATE_NORM = 0.10        # max normalized jump between consecutive ball sightings
+BALL_TRACK_MAX_GAP_FRAMES = 5      # tolerate this many frames with no sighting
+BALL_TRACK_MIN_OBSERVATIONS = 3    # a track shorter than this is not a trajectory
+OBJECT_INFERENCE_LONG_SIDE = 416   # downscale frames before object inference
+OBJECT_WINDOW_PAD_SEC = 1.0        # extra context around a candidate window
+
+# --- Evidence Fusion ---
+# Weighted combination of independent channels. 0.5 is the neutral value an
+# unavailable detector contributes, so a missing model never reads as absence.
+FUSION_W_POSE = 0.5
+FUSION_W_RACKET = 0.2
+FUSION_W_BALL = 0.2
+FUSION_W_TEMPORAL = 0.1
+FUSION_NEUTRAL = 0.5
+FUSION_MIN_CONFIDENCE = 0.45
+
 # --- Pre-Motion Detection ---
 PIXEL_DIFF_THRESHOLD = 20       # Intensity change (0-255) to consider a pixel "changed"
 PIXEL_CHANGE_THRESHOLD = 0.0005 # Fraction of pixels changed to consider "Motion"

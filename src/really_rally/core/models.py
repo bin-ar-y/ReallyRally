@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 @dataclass
 class RallySegment:
@@ -7,6 +8,8 @@ class RallySegment:
     start_time: float
     end_time: float
     score: float = 0.0
+    # Per-channel evidence, populated by Pass 3 when object verification runs.
+    evidence: Optional[object] = field(default=None, repr=False)
 
     @property
     def duration(self):
