@@ -6,6 +6,7 @@ import numpy as np
 from typing import List, Tuple, Dict, Optional
 from really_rally.core.config import *
 from really_rally.core.features import RobustAdaptiveThreshold, RollingZScoreNormalizer
+from really_rally.core.candidate import CoarseCandidateDetector, RallyStateMachine
 from really_rally.core.models import RallySegment
 from really_rally.core.vision import MotionDetector, PoseExtractor
 from really_rally.core.features import MovementTracker, FeatureEngine
@@ -243,7 +244,7 @@ class TennisRallyProcessor:
             try:
                 with open(debug_csv, "w", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Frame", "Time(s)", "Arm_Energy", "Smoothed_Arm", "T_Arm", "Hip_Vel", "Action_Score", "Whip_Ratio", "Smoothed_Whip", "T_Whip", "Player_Height", "Valid_Pose"])
+                    writer.writerow(["Frame", "Time(s)", "Arm_Energy", "Smoothed_Arm", "T_Arm", "Z_Arm", "Hip_Vel", "Spatial_Var", "Action_Score", "Whip_Ratio", "Smoothed_Whip", "T_Whip", "Z_Whip", "Player_Height", "Valid_Pose", "Coarse_Score", "Candidate", "State"])
                     for d in self.all_frame_metrics:
                         writer.writerow([
                             d.get('frame', 0),
@@ -251,13 +252,19 @@ class TennisRallyProcessor:
                             f"{d.get('arm_energy', 0):.4f}",
                             f"{d.get('smoothed_arm', 0):.4f}",
                             f"{d.get('t_arm', 0):.4f}",
+                            f"{d.get('z_arm', 0):.4f}",
                             f"{d.get('hip_vel', 0):.4f}",
+                            f"{d.get('spatial_variance', 0):.4f}",
                             f"{d.get('action_score', 0):.4f}",
                             f"{d.get('whip_ratio', 0):.4f}",
                             f"{d.get('smoothed_whip', 0):.4f}",
                             f"{d.get('t_whip', 0):.4f}",
+                            f"{d.get('z_whip', 0):.4f}",
                             f"{d.get('player_height', 0):.4f}",
-                            int(d.get('is_valid_pose', False))
+                            int(d.get('is_valid_pose', False)),
+                            f"{d.get('coarse_score', 0):.4f}",
+                            int(d.get('candidate', 0)),
+                            d.get('state', '')
                         ])
                 print(f"[Debug] Exported intermediate telemetry to {debug_csv}")
                 
@@ -434,110 +441,56 @@ class TennisRallyProcessor:
         z_whip = z_normalizer_whip.normalize_array(smoothed_whip)
         
         final_segments = []
-        
-        # ---- State Machine Initial Variables ----
-        # State 0 (Idle), State 1 (Potential Rally), State 2 (Active Rally)
-        state = 0
-        rally_start_time = 0.0
-        rally_start_frame = 0
-        last_stroke_time = 0.0
-        peak_score = 0.0
-        
+
+        coarse = CoarseCandidateDetector()
+        fsm = RallyStateMachine(fps=self.fps, max_time=self.total_frames / self.fps)
+
         for i, d in enumerate(frame_data):
             # Inject smoothed values for telemetry dump (raw, human-readable)
             d['smoothed_arm'] = smoothed_arm[i]
             d['smoothed_whip'] = smoothed_whip[i]
-            
+
             # Update Adaptive Buffers with Z-scored values & Get Thresholds.
-            # The Z-scored signal is unitless ("std devs above local mean"),
-            # so thresholds are now source-agnostic.
             arm_adaptive.update(z_arm[i])
             whip_adaptive.update(z_whip[i])
-            
+
             t_arm = arm_adaptive.get_threshold()
             t_whip = whip_adaptive.get_threshold()
-            
-            # Save thresholds in dict for debug export
+
             d['t_arm'] = t_arm
             d['t_whip'] = t_whip
             d['z_arm'] = z_arm[i]
             d['z_whip'] = z_whip[i]
-            
-            # Gating Logic
-            is_valid_pose = d.get('is_valid_pose', False)
+
             scale = d.get('player_height', 0)
             valid_distance = (scale >= PLAYER_HEIGHT_MIN) and (scale <= PLAYER_HEIGHT_MAX)
 
-            # Stroke Condition: use Z-scored signals against adaptive thresholds
-            is_stroke = False
-            if is_valid_pose and valid_distance:
-                if z_arm[i] > t_arm and z_whip[i] > t_whip:
-                    if hip_vels[i] > HIP_VELOCITY_STROKE_THRESHOLD and d.get('spatial_variance', 1.0) >= SPATIAL_VARIANCE_STROKE_MIN:
-                        is_stroke = True
-                        
+            score, _ = coarse.score(
+                valid_pose=d.get('is_valid_pose', False),
+                valid_distance=valid_distance,
+                z_arm=z_arm[i],
+                t_arm=t_arm,
+                z_whip=z_whip[i],
+                t_whip=t_whip,
+                hip_vel=hip_vels[i],
+                spatial_var=d.get('spatial_variance', 1.0),
+            )
+            is_candidate = coarse.is_candidate(score)
+
+            d['coarse_score'] = score
+            d['candidate'] = int(is_candidate)
+
             current_time = d.get('timestamp', 0.0)
             current_frame = d.get('frame', 0)
-            
-            # --- State Machine transitions ---
-            if state == 0:
-                if is_stroke:
-                    # Transition to State 1
-                    state = 1
-                    rally_start_time = max(0.0, current_time - BOUNDARY_PADDING_SEC)
-                    rally_start_frame = max(0, current_frame - int(BOUNDARY_PADDING_SEC * self.fps))
-                    last_stroke_time = current_time
-                    peak_score = smoothed_arm[i]
-                    
-            elif state == 1:
-                # Waiting for 2nd stroke within t_max
-                if is_stroke:
-                    if (current_time - last_stroke_time) > 0.5: # Prevent same stroke double-triggering
-                        state = 2 # Rally confirmed
-                        last_stroke_time = current_time
-                        peak_score = max(peak_score, smoothed_arm[i])
-                else:
-                    if (current_time - last_stroke_time) > RALLY_MAX_STROKE_GAP_SEC:
-                        # Timeout, back to idle
-                        state = 0
-                        
-            elif state == 2:
-                # Active Rally
-                if is_stroke:
-                    last_stroke_time = current_time
-                    peak_score = max(peak_score, smoothed_arm[i])
-                else:
-                    if (current_time - last_stroke_time) > RALLY_MAX_STROKE_GAP_SEC:
-                        # Rally Ends. Save segment.
-                        rally_end_time = min(self.total_frames / self.fps, last_stroke_time + BOUNDARY_PADDING_SEC)
-                        rally_end_frame = int(rally_end_time * self.fps)
-                        
-                        duration = rally_end_time - rally_start_time
-                        if duration >= MIN_RALLY_DURATION_SEC:
-                            segment = RallySegment(
-                                start_frame=rally_start_frame,
-                                end_frame=rally_end_frame,
-                                start_time=rally_start_time,
-                                end_time=rally_end_time,
-                                score=peak_score
-                            )
-                            final_segments.append(segment)
-                            
-                        # Reset to idle
-                        state = 0
-                        
-        # Handle trailing rally if video ends while in State 2
-        if state == 2:
-            rally_end_time = min(self.total_frames / self.fps, last_stroke_time + BOUNDARY_PADDING_SEC)
-            rally_end_frame = int(rally_end_time * self.fps)
-            if (rally_end_time - rally_start_time) >= MIN_RALLY_DURATION_SEC:
-                segment = RallySegment(
-                    start_frame=rally_start_frame,
-                    end_frame=rally_end_frame,
-                    start_time=rally_start_time,
-                    end_time=rally_end_time,
-                    score=peak_score
-                )
+
+            segment = fsm.step(is_candidate, current_frame, current_time, score)
+            d['state'] = fsm.state_name
+            if segment is not None:
                 final_segments.append(segment)
+
+        trailing = fsm.finalize()
+        if trailing is not None:
+            final_segments.append(trailing)
 
         self.all_frame_metrics.extend(frame_data)
         

@@ -29,7 +29,11 @@ WHIP_RATIO_THRESHOLD = 1.2
 ADAPTIVE_WINDOW_SEC = 45.0      # Sliding window for resting baseline (longer = stabler)
 ARM_ENERGY_K_MULTIPLIER = 2.5   # Sensitivity multiplier (P25 + k*MAD). 2.5 ≈ ~2σ in Z-space
 WHIP_RATIO_K_MULTIPLIER = 2.5   # Sensitivity multiplier for whip ratio
-RALLY_MAX_STROKE_GAP_SEC = 7.0  # Max time between strokes before rally ends
+# Rally state machine: harder to START than to CONTINUE. Two candidate strokes
+# must arrive within START_GAP to confirm a rally, but once active a gap up to
+# CONTINUE_GAP keeps it alive (a single missed stroke never truncates it).
+RALLY_START_GAP_SEC = 7.0
+RALLY_CONTINUE_GAP_SEC = 11.0
 MIN_ENERGY_FLOOR = 0.25         # Absolute minimum threshold for arm energy (Z-score space)
 MIN_WHIP_FLOOR = 0.25           # Absolute minimum threshold for whip ratio (Z-score space)
 
@@ -42,6 +46,17 @@ PLAYER_HEIGHT_MAX = 1.50        # Maximum fraction of frame height
 # --- Stroke Detection Gates ---
 HIP_VELOCITY_STROKE_THRESHOLD = 0.005  # Minimum hip velocity for a stroke (bbox-normalized)
 SPATIAL_VARIANCE_STROKE_MIN = 0.01     # Minimum spatial variance for stroke (was MIN_COURT_COVERAGE)
+
+# --- Coarse Candidate Detection (high-recall additive score) ---
+# Replaces the strict AND-gate: each signal that clears its own threshold adds
+# its weight to an evidence score. A single strong signal (arm OR whip) can
+# fire a candidate alone; weaker signals accumulate. This is the recall-first
+# stage — object/temporal verification happens later.
+COARSE_W_ARM = 2.0
+COARSE_W_WHIP = 2.0
+COARSE_W_HIP = 1.0
+COARSE_W_SPATIAL = 0.5
+COARSE_CANDIDATE_THRESHOLD = 2.0
 
 # --- Pre-Motion Detection ---
 PIXEL_DIFF_THRESHOLD = 20       # Intensity change (0-255) to consider a pixel "changed"

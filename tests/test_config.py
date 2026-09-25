@@ -18,6 +18,10 @@ class TestConfigValues:
         """MIN_RALLY_DURATION_SEC should be <= GAP_MERGE_THRESHOLD_SEC."""
         assert config.MIN_RALLY_DURATION_SEC <= config.GAP_MERGE_THRESHOLD_SEC
 
+    def test_rally_harder_to_start_than_continue(self):
+        """Hysteresis invariant: continuing a rally must tolerate a longer gap."""
+        assert config.RALLY_START_GAP_SEC < config.RALLY_CONTINUE_GAP_SEC
+
     def test_boundary_padding_reasonable(self):
         """Padding should be less than min rally duration."""
         assert config.BOUNDARY_PADDING_SEC < config.MIN_RALLY_DURATION_SEC
@@ -62,7 +66,9 @@ class TestConfigImports:
             "ADAPTIVE_WINDOW_SEC",
             "ARM_ENERGY_K_MULTIPLIER",
             "WHIP_RATIO_K_MULTIPLIER",
-            "RALLY_MAX_STROKE_GAP_SEC",
+            "RALLY_START_GAP_SEC",
+            "RALLY_CONTINUE_GAP_SEC",
+            "COARSE_CANDIDATE_THRESHOLD",
             "MIN_ENERGY_FLOOR",
             "MIN_WHIP_FLOOR",
             "MIN_COURT_COVERAGE",
