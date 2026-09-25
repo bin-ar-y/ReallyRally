@@ -11,7 +11,10 @@ from really_rally.core.vision import MotionDetector, PoseExtractor
 from really_rally.core.features import MovementTracker, FeatureEngine
 from really_rally.utils.media_io import generate_rally_name
 import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
+
+if os.environ.get("REALLY_RALLY_ALLOW_INSECURE_SSL"):
+    # Opt-in for proxy/CDN environments; the pipeline is otherwise fully offline.
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 class TennisRallyProcessor:
     def __init__(self, video_path: str, output_dir: str, keep_clips: bool = False, progress_callback=None, stop_event=None, target_format=None, generate_plot: bool = False):
@@ -543,17 +546,6 @@ class TennisRallyProcessor:
             self.last_segment_end_frame = frame_data[-1].get('frame', 0)
         
         return final_segments
-    def _mask_to_segments(self, mask):
-        """Helper to convert boolean mask to start/end indices"""
-        # Find runs of 1s
-        # Pad with 0 at ends to handle edge cases
-        padded = np.concatenate(([0], mask, [0]))
-        diffs = np.diff(padded)
-        starts = np.where(diffs == 1)[0]
-        ends = np.where(diffs == -1)[0]
-        return list(zip(starts, ends))
-        
-
 
     def export_clips(self, segments: List[RallySegment]) -> List[str]:
         """Export clips using ffmpeg. Returns list of output paths."""
@@ -688,10 +680,14 @@ class TennisRallyProcessor:
         try:
             res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
             if res.returncode != 0:
-                 print(f"Error transferring metadata: {res.stderr.decode()}")
-                 return
+                print(f"Error transferring metadata: {res.stderr.decode()}")
+                if os.path.exists(temp_output):
+                    os.remove(temp_output)
+                return
         except subprocess.TimeoutExpired:
-             print("Error: Metadata transfer timed out.")
-             return
-             
-        # Replace original with meta version
+            print("Error: Metadata transfer timed out.")
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            return
+
+        os.replace(temp_output, target_path)
