@@ -8,7 +8,7 @@ from really_rally.core.config import *
 from really_rally.core.features import RobustAdaptiveThreshold, RollingZScoreNormalizer
 from really_rally.core.candidate import CoarseCandidateDetector, RallyStateMachine
 from really_rally.core.models import RallySegment
-from really_rally.core.vision import MotionDetector, PoseExtractor
+from really_rally.core.vision import MotionDetector, get_pose_extractor
 from really_rally.core.features import MovementTracker, FeatureEngine
 from really_rally.utils.media_io import generate_rally_name
 import ssl
@@ -45,7 +45,7 @@ class TennisRallyProcessor:
         print(f"Video info: {self.width}x{self.height} @ {self.fps}fps, {self.total_frames} frames")
         
         # Initialize Detectors
-        self.pose_extractor = PoseExtractor()
+        self.pose_extractor = get_pose_extractor()
         # Pass 1 Detector (Robust)
         self.motion_detector = MotionDetector(
             self.width, self.height, 
@@ -295,8 +295,8 @@ class TennisRallyProcessor:
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         self.feature_engine = FeatureEngine(self.fps) # Reset for new segment
         
-        # Local Pose Extractor (Fresh instance per segment for robustness)
-        local_pose_extractor = PoseExtractor()
+        # Shared, cached PoseExtractor (see core.vision.get_pose_extractor)
+        local_pose_extractor = self.pose_extractor
         
         # Movement Tracker for Feeder Rejection
         movement_tracker = MovementTracker(MOVEMENT_WINDOW_SEC, self.fps)
@@ -524,6 +524,11 @@ class TennisRallyProcessor:
                 writer.writerow(["Source Video", "Clip", "Start Time", "End Time", "Duration"])
             
             for i, seg in enumerate(segments):
+                # Cancellation boundary: stop between clips, never mid-encode.
+                if self.stop_event and self.stop_event.is_set():
+                    print("Export stopped by user.")
+                    break
+
                 # Unique name: {VideoStem}_rally_{i+1:03d}_{uuid}.mp4
                 import uuid
                 unique_suffix = str(uuid.uuid4())[:8]
@@ -602,7 +607,12 @@ class TennisRallyProcessor:
             output_path
         ]
         
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600)
+        except subprocess.TimeoutExpired:
+            print("Error: merging clips timed out.")
+            os.remove(list_path)
+            return None
         if res.returncode != 0:
              print(f"Error merging clips: {res.stderr.decode()}")
              return None

@@ -53,10 +53,32 @@ class PoseExtractor:
             min_detection_confidence=MP_MIN_DETECTION_CONF,
             min_tracking_confidence=MP_MIN_TRACKING_CONF
         )
-    
+
     def process_frame(self, frame_rgb):
         return self.pose.process(frame_rgb)
-    
+
     def get_dominant_player(self, landmarks_list, prev_center=None) -> Optional[any]:
         return landmarks_list
+
+    def close(self):
+        self.pose.close()
+
+
+_CACHED_POSE_EXTRACTOR: Optional[PoseExtractor] = None
+
+
+def get_pose_extractor() -> PoseExtractor:
+    """Return a process-wide shared PoseExtractor, building it on first use.
+
+    Constructing a MediaPipe graph costs a few hundred milliseconds. The
+    pipeline previously built one per processor and again per motion segment,
+    which dominated startup and made the GUI look frozen before the first
+    progress event. The graph is stateless between calls to ``process()`` for
+    our purposes (tracking state carries at most one segment's worth of stale
+    landmarks, and segments are separated by multi-second gaps anyway).
+    """
+    global _CACHED_POSE_EXTRACTOR
+    if _CACHED_POSE_EXTRACTOR is None:
+        _CACHED_POSE_EXTRACTOR = PoseExtractor()
+    return _CACHED_POSE_EXTRACTOR
 

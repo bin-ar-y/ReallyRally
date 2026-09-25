@@ -2,6 +2,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
+import queue
 import sys
 import threading
 import subprocess
@@ -30,6 +31,10 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.output_dir = os.getcwd() # Default to CWD for speed, avoids network scan
         self.is_processing = False
         self.stop_event = threading.Event()
+        # Worker threads must never touch Tk directly. They enqueue messages
+        # here; the main thread drains this queue from an after() poller.
+        self._ui_queue = queue.Queue()
+        self._worker = None
         self.processing_mode = tk.StringVar(value="Rally Extraction")
         self.plot_var = tk.BooleanVar(value=False)
 
@@ -45,6 +50,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.grid_rowconfigure(3, weight=0) # Status
 
         self.create_widgets()
+        self._poll_ui_queue()
 
     def create_widgets(self):
         # --- Header ---
@@ -134,7 +140,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_process = ctk.CTkButton(self.btn_frame, text="START PROCESSING", height=40, font=ctk.CTkFont(size=14, weight="bold"), command=self.start_processing_thread)
         self.btn_process.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        self.btn_stop = ctk.CTkButton(self.btn_frame, text="PANNIC STOP", height=40, font=ctk.CTkFont(size=14, weight="bold"), fg_color="#D32F2F", hover_color="#B71C1C", command=self.stop_processing, state="disabled")
+        self.btn_stop = ctk.CTkButton(self.btn_frame, text="PANIC STOP", height=40, font=ctk.CTkFont(size=14, weight="bold"), fg_color="#D32F2F", hover_color="#B71C1C", command=self.stop_processing, state="disabled")
         self.btn_stop.pack(side="right", fill="x", expand=True, padx=(10, 0))
 
         # --- Status Footer ---
@@ -221,13 +227,41 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             self.entry_output.insert(0, self.output_dir)
             self.entry_output.configure(state="disabled")
 
+    # --- Thread-safe UI messaging ---
+
     def log(self, message, progress=None):
-        def _update():
-            self.lbl_status.configure(text=f"Status: {message}")
-            self.lbl_progress_text.configure(text=message)
+        """Queue a status update. Safe to call from the worker thread."""
+        self._ui_queue.put(("log", message, progress))
+
+    def _notify(self, kind, title, message):
+        """Queue a dialog. Safe to call from the worker thread."""
+        self._ui_queue.put((kind, title, message))
+
+    def _poll_ui_queue(self):
+        """Drain queued worker messages on the Tk main thread."""
+        try:
+            while True:
+                self._handle_ui_message(self._ui_queue.get_nowait())
+        except queue.Empty:
+            pass
+        self.after(50, self._poll_ui_queue)
+
+    def _handle_ui_message(self, msg):
+        kind = msg[0]
+        if kind == "log":
+            _, text, progress = msg
+            self.lbl_status.configure(text=f"Status: {text}")
+            self.lbl_progress_text.configure(text=text)
             if progress is not None:
                 self.progress_bar.set(progress)
-        self.after(0, _update)
+        elif kind == "info":
+            messagebox.showinfo(msg[1], msg[2])
+        elif kind == "error":
+            messagebox.showerror(msg[1], msg[2])
+        elif kind == "warning":
+            messagebox.showwarning(msg[1], msg[2])
+        elif kind == "reset":
+            self.reset_ui()
 
     def start_processing_thread(self):
         if not self.video_files:
@@ -240,28 +274,37 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.is_processing = True
         self.stop_event.clear()
 
-        # UI State
+        # Immediate visual feedback: controls flip state before any work begins.
         self.btn_process.configure(state="disabled", text="Processing...")
         self.btn_add_files.configure(state="disabled")
         self.btn_clear_files.configure(state="disabled")
         self.btn_select_output.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.progress_bar.set(0)
+        self.lbl_progress_text.configure(text="Starting…")
+        self.lbl_status.configure(text="Status: Starting…")
 
-        thread = threading.Thread(target=self.run_processing)
-        thread.start()
+        self._worker = threading.Thread(target=self.run_processing, daemon=True)
+        self._worker.start()
 
     def stop_processing(self):
-        if self.is_processing:
-            if messagebox.askyesno("Stop", "Are you sure you want to stop processing?"):
-                self.stop_event.set()
-                self.log("Stopping... handling cleanup...", 0)
-                self.btn_stop.configure(state="disabled")
+        if not self.is_processing:
+            return
+        if messagebox.askyesno("Stop", "Are you sure you want to stop processing?"):
+            # Acknowledge instantly; cancellation is cooperative.
+            self.btn_stop.configure(state="disabled", text="STOPPING…")
+            self.lbl_progress_text.configure(text="Stopping… finishing current step")
+            self.lbl_status.configure(text="Status: Stopping…")
+            self.stop_event.set()
 
     def run_processing(self):
         try:
             all_clip_paths = []
             serve_events = []
+
+            # Tell the user work has begun before the first slow step (probing
+            # the container and building the MediaPipe graph).
+            self.log("Initializing…", 0.0)
 
             # 1. Detect Format (Standardization)
             target_format = None
@@ -338,7 +381,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             # 3. Finalize
             if self.stop_event.is_set():
                 self.log("Stopped by user.", 0)
-                self.after(0, lambda: messagebox.showinfo("Stopped", "Processing stopped by user."))
+                self._notify("info", "Stopped", "Processing stopped by user.")
                 return
 
             mode = self.processing_mode.get()
@@ -370,29 +413,29 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
                     self.log("Done!", 1.0)
                     msg = f"Processing Complete!\n\n{summary}\n\nSaved to:\n{merged_path}"
-                    self.after(0, lambda: messagebox.showinfo("Success", msg))
-                    subprocess.call(["open", "-R", merged_path])
+                    self._notify("info", "Success", msg)
+                    # Reveal in Finder without blocking the worker.
+                    subprocess.Popen(["open", "-R", merged_path])
                 else:
                     self.log("Error during merge.", 0)
-                    self.after(0, lambda: messagebox.showerror("Error", "Failed to merge clips."))
+                    self._notify("error", "Error", "Failed to merge clips.")
             else:
                 no_found = {
                     "Serving Practice": "No serves detected.",
                     "Multiball Training": "No feeds detected.",
                 }.get(mode, "No rallies detected.")
                 self.log(no_found, 0)
-                self.after(0, lambda msg=no_found: messagebox.showinfo("Info", msg))
+                self._notify("info", "Info", no_found)
 
         except Exception as exc:
             self.log(f"Error: {str(exc)}", 0)
-            _err_msg = str(exc)
-            self.after(0, lambda msg=_err_msg: messagebox.showerror("Error", f"An error occurred:\n{msg}"))
+            self._notify("error", "Error", f"An error occurred:\n{exc}")
             import traceback
             traceback.print_exc()
 
         finally:
             self.is_processing = False
-            self.after(0, self.reset_ui)
+            self._ui_queue.put(("reset",))
 
     def _serve_summary(self, serve_events):
         """Human-readable serve detection summary for the completion dialog."""
@@ -412,13 +455,14 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         return "\n".join(parts)
 
     def reset_ui(self):
+        """Restore controls after a worker finishes (main thread only)."""
+        if self.is_processing:
+            return
         self.btn_process.configure(state="normal", text="START PROCESSING")
         self.btn_add_files.configure(state="normal")
         self.btn_clear_files.configure(state="normal")
         self.btn_select_output.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
-        if not self.is_processing:
-             pass
+        self.btn_stop.configure(state="disabled", text="PANIC STOP")
 
 
 def main():
