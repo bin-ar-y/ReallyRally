@@ -64,6 +64,16 @@ COARSE_W_HIP = 1.0
 COARSE_W_SPATIAL = 0.5
 COARSE_CANDIDATE_THRESHOLD = 2.0
 
+# Absolute floors in RAW (bbox-normalized) feature space. The Z-score is
+# scale-free, so early in a clip — or whenever the rolling window happens to be
+# quiet — a numerically negligible arm energy (measured ~0.0007) divides by a
+# tiny window std and is amplified to z > 2, opening a candidate on noise.
+# Genuine swings measure 0.09-0.13, so these floors sit two orders of magnitude
+# below real activity: they suppress amplification noise without touching
+# strokes. Evidence below the floor never counts, whatever its Z-score.
+COARSE_MIN_ABS_ARM = 0.005
+COARSE_MIN_ABS_WHIP = 0.3
+
 # --- Pre-Motion Detection ---
 PIXEL_DIFF_THRESHOLD = 20       # Intensity change (0-255) to consider a pixel "changed"
 PIXEL_CHANGE_THRESHOLD = 0.0005 # Fraction of pixels changed to consider "Motion"

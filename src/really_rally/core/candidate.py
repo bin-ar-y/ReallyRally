@@ -25,6 +25,8 @@ from typing import List, Optional, Tuple
 from really_rally.core.config import (
     BOUNDARY_PADDING_SEC,
     COARSE_CANDIDATE_THRESHOLD,
+    COARSE_MIN_ABS_ARM,
+    COARSE_MIN_ABS_WHIP,
     COARSE_W_ARM,
     COARSE_W_HIP,
     COARSE_W_SPATIAL,
@@ -50,6 +52,8 @@ class CoarseCandidateDetector:
         candidate_threshold: float = COARSE_CANDIDATE_THRESHOLD,
         hip_min: float = HIP_VELOCITY_STROKE_THRESHOLD,
         spatial_min: float = SPATIAL_VARIANCE_STROKE_MIN,
+        min_abs_arm: float = COARSE_MIN_ABS_ARM,
+        min_abs_whip: float = COARSE_MIN_ABS_WHIP,
     ):
         self.w_arm = w_arm
         self.w_whip = w_whip
@@ -58,6 +62,8 @@ class CoarseCandidateDetector:
         self.candidate_threshold = candidate_threshold
         self.hip_min = hip_min
         self.spatial_min = spatial_min
+        self.min_abs_arm = min_abs_arm
+        self.min_abs_whip = min_abs_whip
 
     def score(
         self,
@@ -69,17 +75,25 @@ class CoarseCandidateDetector:
         t_whip: float,
         hip_vel: float,
         spatial_var: float,
+        raw_arm: float = float("inf"),
+        raw_whip: float = float("inf"),
     ) -> Tuple[float, List[str]]:
-        """Return (evidence_score, fired_signals) for one frame."""
+        """Return (evidence_score, fired_signals) for one frame.
+
+        ``raw_arm`` / ``raw_whip`` are the un-normalized (bbox-normalized, but
+        not Z-scored) feature values. They gate the scale-free Z-score so that
+        amplification of negligible signal cannot open a candidate. They
+        default to infinity so existing callers keep the previous behaviour.
+        """
         if not (valid_pose and valid_distance):
             return 0.0, []
 
         score = 0.0
         fired: List[str] = []
-        if z_arm > t_arm:
+        if z_arm > t_arm and raw_arm >= self.min_abs_arm:
             score += self.w_arm
             fired.append("arm")
-        if z_whip > t_whip:
+        if z_whip > t_whip and raw_whip >= self.min_abs_whip:
             score += self.w_whip
             fired.append("whip")
         if hip_vel > self.hip_min:

@@ -92,6 +92,55 @@ class TestCoarseCandidateDetector:
         assert score == 5.5
 
 
+class TestAbsoluteFloors:
+    """The Z-score is scale-free, so a negligible raw signal can still reach a
+    high z when the rolling window is quiet. The floors stop that."""
+
+    def test_negligible_arm_with_high_z_does_not_fire(self):
+        d = _detector()
+        score, fired = d.score(
+            valid_pose=True, valid_distance=True,
+            z_arm=5.0, t_arm=1.0, z_whip=0.0, t_whip=1.0,
+            hip_vel=0.0, spatial_var=0.0,
+            raw_arm=0.0007,      # numerically nothing, amplified to z=5
+            raw_whip=0.0,
+        )
+        assert "arm" not in fired
+        assert not d.is_candidate(score)
+
+    def test_genuine_arm_above_floor_still_fires(self):
+        d = _detector()
+        score, fired = d.score(
+            valid_pose=True, valid_distance=True,
+            z_arm=5.0, t_arm=1.0, z_whip=0.0, t_whip=1.0,
+            hip_vel=0.0, spatial_var=0.0,
+            raw_arm=0.0997,      # a real swing
+            raw_whip=0.0,
+        )
+        assert "arm" in fired
+        assert d.is_candidate(score)
+
+    def test_negligible_whip_does_not_fire(self):
+        d = _detector()
+        _, fired = d.score(
+            valid_pose=True, valid_distance=True,
+            z_arm=0.0, t_arm=1.0, z_whip=5.0, t_whip=1.0,
+            hip_vel=0.0, spatial_var=0.0,
+            raw_arm=0.0, raw_whip=0.05,   # below COARSE_MIN_ABS_WHIP
+        )
+        assert "whip" not in fired
+
+    def test_floors_default_to_infinity_for_existing_callers(self):
+        """Omitting the raw args must preserve the previous behaviour."""
+        d = _detector()
+        _, fired = d.score(
+            valid_pose=True, valid_distance=True,
+            z_arm=5.0, t_arm=1.0, z_whip=0.0, t_whip=1.0,
+            hip_vel=0.0, spatial_var=0.0,
+        )
+        assert "arm" in fired
+
+
 class TestRallyStateMachine:
     def _sm(self, **kw):
         return RallyStateMachine(fps=FPS, max_time=MAX_TIME, **kw)

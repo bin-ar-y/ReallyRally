@@ -474,6 +474,8 @@ class TennisRallyProcessor:
                 t_whip=t_whip,
                 hip_vel=hip_vels[i],
                 spatial_var=d.get('spatial_variance', 1.0),
+                raw_arm=smoothed_arm[i],
+                raw_whip=smoothed_whip[i],
             )
             is_candidate = coarse.is_candidate(score)
 
