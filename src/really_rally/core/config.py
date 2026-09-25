@@ -15,6 +15,12 @@ MP_MIN_TRACKING_CONF = 0.5
 WINDOW_SIZE_FRAMES = 15         # Smoothing window size (e.g., 0.25s @ 60fps)
 PROCESS_EVERY_N_FRAMES = 2      # Sample every Nth frame (~30fps effective for smoother tracking)
 
+# MediaPipe drops the pose exactly when it matters most: the swing is fastest
+# and most motion-blurred at ball contact. Bridging a short dropout keeps the
+# previous landmarks so the reacquired frame still yields a velocity (scaled by
+# the elapsed sample steps) instead of a spurious zero.
+POSE_DROPOUT_BRIDGE_STEPS = 3
+
 # --- Heuristic Thresholds (legacy, kept for reference) ---
 MOTION_ENERGY_THRESHOLD = 0.001
 LATERAL_VELOCITY_THRESHOLD = 0.0005

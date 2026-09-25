@@ -75,6 +75,7 @@ class FeatureEngine:
     def __init__(self, fps):
         self.fps = fps
         self.prev_landmarks = None
+        self._gap_steps = 0  # sample steps since the last valid pose
 
         # Buffers for smoothing
         self.energy_buffer = []
@@ -109,7 +110,12 @@ class FeatureEngine:
         }
 
         if landmarks is None:
-            self.prev_landmarks = None
+            # Hold the previous pose across a short dropout so the next valid
+            # frame still produces a velocity instead of a spurious zero.
+            self._gap_steps += 1
+            if self._gap_steps > POSE_DROPOUT_BRIDGE_STEPS:
+                self.prev_landmarks = None
+                self._gap_steps = 0
             return features
         
         # Extract (x, y) for all 33 landmarks
@@ -155,9 +161,13 @@ class FeatureEngine:
             bbox_diag = np.linalg.norm(bbox_max - bbox_min)
             if bbox_diag < 0.01: bbox_diag = 0.01
             
-            # Calculate velocities (Euclidean distance per joint)
+            # Calculate velocities (Euclidean distance per joint). Displacement
+            # is divided by the number of sample steps it spans, so a velocity
+            # measured across a bridged dropout is a per-step rate, comparable
+            # to a normal frame-to-frame velocity.
+            step_span = max(1, self._gap_steps + 1)
             diff = curr_coords - self.prev_landmarks
-            velocities = np.linalg.norm(diff, axis=1) # Shape (33,)
+            velocities = np.linalg.norm(diff, axis=1) / step_span  # Shape (33,)
             
             # Global Motion Energy (Raw)
             features['energy'] = np.mean(velocities)
@@ -203,6 +213,7 @@ class FeatureEngine:
             features['vert_v'] = abs(hip_diff[1])
             
         self.prev_landmarks = curr_coords
+        self._gap_steps = 0
         return features
 
 class SelfAdaptiveThreshold:

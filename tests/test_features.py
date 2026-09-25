@@ -334,4 +334,53 @@ class TestFeatureEngine:
         fe.compute_features(None, 0.033)  # lost tracking
         feats = fe.compute_features(lms, 0.066)  # reacquired
         assert feats["is_valid_pose"] is True
-        assert feats["energy"] == 0.0  # prev was reset
+        assert feats["energy"] == 0.0  # same pose, so no displacement
+
+    def test_dropout_bridged_keeps_velocity(self):
+        """A pose reacquired after one dropped frame still yields motion.
+
+        MediaPipe most often drops the pose at ball contact, exactly where
+        velocity carries the signal. Resetting prev_landmarks there produced a
+        spurious zero; the bridge keeps the previous pose for short gaps.
+        """
+        fe = FeatureEngine(fps=30)
+        lms1 = MockLandmarkList(make_stationary_landmarks())
+        fe.compute_features(lms1, 0.0)
+        fe.compute_features(None, 0.033)          # single dropped frame
+
+        moved = make_stationary_landmarks()
+        for lm in moved:
+            lm.x += 0.05
+        feats = fe.compute_features(MockLandmarkList(moved), 0.066)
+        assert feats["is_valid_pose"] is True
+        assert feats["energy"] > 0.0, "velocity lost across a 1-frame dropout"
+
+    def test_long_dropout_resets_prev(self):
+        """A gap beyond the bridge limit must not fabricate motion."""
+        from really_rally.core.config import POSE_DROPOUT_BRIDGE_STEPS
+
+        fe = FeatureEngine(fps=30)
+        fe.compute_features(MockLandmarkList(make_stationary_landmarks()), 0.0)
+        for i in range(POSE_DROPOUT_BRIDGE_STEPS + 1):
+            fe.compute_features(None, 0.033 * (i + 1))
+
+        moved = make_stationary_landmarks()
+        for lm in moved:
+            lm.x += 0.05
+        feats = fe.compute_features(MockLandmarkList(moved), 0.5)
+        assert feats["energy"] == 0.0  # treated as a fresh start
+
+    def test_bridged_velocity_is_per_step_scaled(self):
+        """Displacement across a gap is divided by the steps it spans."""
+        def energy_across_gap(n_gaps):
+            fe = FeatureEngine(fps=30)
+            fe.compute_features(MockLandmarkList(make_stationary_landmarks()), 0.0)
+            for i in range(n_gaps):
+                fe.compute_features(None, 0.033 * (i + 1))
+            moved = make_stationary_landmarks()
+            for lm in moved:
+                lm.x += 0.05
+            return fe.compute_features(MockLandmarkList(moved), 0.5)["energy"]
+
+        # Same displacement over more steps => lower per-step velocity.
+        assert energy_across_gap(1) > energy_across_gap(3)
