@@ -12,7 +12,14 @@ __pycache__/
 results/
 rallies/
 *.mp4
+*.mov
 *.MOV
+*.avi
+*.mkv
+
+# Benchmark case videos are large; annotations.json and mode.txt stay tracked.
+benchmarks/cases/**/video.*
+benchmarks/cases/**/*.png
 
 # R history
 .Rhistory

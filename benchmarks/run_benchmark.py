@@ -85,8 +85,13 @@ def discover_cases(cases_dir: str) -> List[dict]:
     return cases
 
 
-def run_detection(case: dict, output_dir: str) -> Optional[str]:
-    """Run the appropriate processor on a video, return path to rallies CSV."""
+def run_detection(case: dict, output_dir: str) -> tuple:
+    """Run the appropriate processor on a video.
+
+    Returns (csv_path_or_None, timing_dict). Timing is reported separately from
+    detection quality so a change that improves recall at an unacceptable
+    slowdown is visible rather than silently accepted.
+    """
     video_path = case["video_path"]
     mode = case["mode"]
 
@@ -101,29 +106,37 @@ def run_detection(case: dict, output_dir: str) -> Optional[str]:
 
     try:
         processor = processor_cls(video_path, output_dir, keep_clips=False)
+        fps = processor.fps or 0.0
+        duration = (processor.total_frames / fps) if fps else 0.0
         processor.process_video()
         elapsed = time.time() - t0
-        print(f"    Completed in {elapsed:.1f}s")
+        print(f"    Completed in {elapsed:.1f}s ({duration:.1f}s video)")
+
+        timing = {
+            "seconds": round(elapsed, 2),
+            "video_seconds": round(duration, 2),
+            "realtime_factor": round(elapsed / duration, 3) if duration else None,
+        }
 
         # Find the output CSV
         csv_name = {"rally": "rallies.csv", "serve": "serves.csv", "feed": "feeds.csv"}.get(mode, "rallies.csv")
         csv_path = os.path.join(output_dir, csv_name)
         if os.path.isfile(csv_path):
-            return csv_path
-        else:
-            print(f"    Warning: no {csv_name} produced (no segments detected)")
-            return None
+            return csv_path, timing
+        print(f"    Warning: no {csv_name} produced (no segments detected)")
+        return None, timing
     except Exception as e:
         print(f"    Error: {e}")
-        return None
+        return None, {}
 
 
-def evaluate_case(case: dict, csv_path: str) -> Dict:
+def evaluate_case(case: dict, csv_path: str, timing: Optional[Dict] = None) -> Dict:
     """Compute metrics at all IoU thresholds for one case."""
     gt = load_ground_truth(case["gt_path"])
     pred = load_predictions(csv_path)
 
-    results = {"name": case["name"], "mode": case["mode"], "num_gt": len(gt), "num_pred": len(pred), "thresholds": {}}
+    results = {"name": case["name"], "mode": case["mode"], "num_gt": len(gt),
+               "num_pred": len(pred), "timing": timing or {}, "thresholds": {}}
 
     for iou in IOU_THRESHOLDS:
         metrics = compute_metrics(gt, pred, iou)
@@ -135,6 +148,8 @@ def evaluate_case(case: dict, csv_path: str) -> Dict:
             "fp": metrics["fp"],
             "fn": metrics["fn"],
             "mean_iou": round(metrics["mean_iou"], 4),
+            "boundary_start_error_sec": round(metrics["boundary_start_error_sec"], 3),
+            "boundary_end_error_sec": round(metrics["boundary_end_error_sec"], 3),
         }
 
     return results
@@ -150,13 +165,32 @@ def print_summary(all_results: List[Dict]):
         best = r["thresholds"]["iou_0.3"]
         print(f"\n  {r['name']}  [{r['mode']}]  (GT={r['num_gt']}, Pred={r['num_pred']})")
         print(f"    IoU=0.3 →  P={best['precision']:.3f}  R={best['recall']:.3f}  F1={best['f1']:.3f}  |  TP={best['tp']} FP={best['fp']} FN={best['fn']}")
+        print(f"    Boundary err → start {best['boundary_start_error_sec']:.2f}s, "
+              f"end {best['boundary_end_error_sec']:.2f}s")
+        t = r.get("timing") or {}
+        if t.get("realtime_factor") is not None:
+            print(f"    Runtime → {t['seconds']:.1f}s for {t['video_seconds']:.1f}s video "
+                  f"({t['realtime_factor']:.2f}x realtime)")
 
     # Aggregate
-    if all_results:
-        avg_f1 = sum(r["thresholds"]["iou_0.3"]["f1"] for r in all_results) / len(all_results)
+    scored = [r for r in all_results if r.get("thresholds")]
+    if scored:
+        avg_f1 = sum(r["thresholds"]["iou_0.3"]["f1"] for r in scored) / len(scored)
+        avg_recall = sum(r["thresholds"]["iou_0.3"]["recall"] for r in scored) / len(scored)
+        avg_prec = sum(r["thresholds"]["iou_0.3"]["precision"] for r in scored) / len(scored)
+        total_fn = sum(r["thresholds"]["iou_0.3"]["fn"] for r in scored)
+        total_fp = sum(r["thresholds"]["iou_0.3"]["fp"] for r in scored)
         print("\n  --- Aggregate (IoU=0.3) ---")
-        print(f"  Cases: {len(all_results)}")
-        print(f"  Avg F1: {avg_f1:.3f}")
+        print(f"  Cases: {len(scored)}")
+        print(f"  Avg Precision: {avg_prec:.3f}")
+        print(f"  Avg Recall   : {avg_recall:.3f}   (primary metric)")
+        print(f"  Avg F1       : {avg_f1:.3f}")
+        print(f"  Missed rallies (FN): {total_fn}    False rallies (FP): {total_fp}")
+
+        rts = [r["timing"]["realtime_factor"] for r in scored
+               if (r.get("timing") or {}).get("realtime_factor")]
+        if rts:
+            print(f"  Avg runtime  : {sum(rts)/len(rts):.2f}x realtime")
 
     print("=" * 80 + "\n")
 
@@ -184,10 +218,10 @@ def main():
         print(f"\n--- {case['name']} ---")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            csv_path = run_detection(case, tmpdir)
+            csv_path, timing = run_detection(case, tmpdir)
 
             if csv_path:
-                result = evaluate_case(case, csv_path)
+                result = evaluate_case(case, csv_path, timing)
                 all_results.append(result)
             else:
                 all_results.append({
@@ -196,6 +230,7 @@ def main():
                     "num_gt": len(load_ground_truth(case["gt_path"])),
                     "num_pred": 0,
                     "thresholds": {},
+                    "timing": timing,
                     "error": "No predictions produced",
                 })
 

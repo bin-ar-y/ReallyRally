@@ -203,7 +203,22 @@ def compute_metrics(
     mean_iou = 0.0
     if result['matches']:
         mean_iou = sum(m[2] for m in result['matches']) / len(result['matches'])
-    
+
+    # Boundary timing error on matched pairs: how far the predicted clip edges
+    # sit from the annotated ones. A detector can have perfect recall of *which*
+    # rallies occurred yet clip them badly; this makes that visible separately
+    # from P/R, and it is measured in seconds so it is directly interpretable.
+    start_err = end_err = 0.0
+    if result['matches']:
+        start_err = sum(
+            abs(gt_segments[gi][0] - pred_segments[pi][0])
+            for gi, pi, _ in result['matches']
+        ) / len(result['matches'])
+        end_err = sum(
+            abs(gt_segments[gi][1] - pred_segments[pi][1])
+            for gi, pi, _ in result['matches']
+        ) / len(result['matches'])
+
     return {
         'precision': precision,
         'recall': recall,
@@ -212,6 +227,8 @@ def compute_metrics(
         'fp': fp,
         'fn': fn,
         'mean_iou': mean_iou,
+        'boundary_start_error_sec': start_err,
+        'boundary_end_error_sec': end_err,
         'matches': [
             {
                 'gt': gt_segments[gi],
@@ -243,6 +260,9 @@ def print_report(metrics: Dict, iou_threshold: float):
     print(f"  Recall        : {metrics['recall']:.4f}")
     print(f"  F1 Score      : {metrics['f1']:.4f}")
     print(f"  Mean IoU      : {metrics['mean_iou']:.4f}")
+    if metrics['matches']:
+        print(f"  Boundary error: start {metrics['boundary_start_error_sec']:.2f}s, "
+              f"end {metrics['boundary_end_error_sec']:.2f}s")
     print("-" * 60)
     
     if metrics['matches']:
