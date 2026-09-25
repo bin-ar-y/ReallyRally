@@ -13,21 +13,30 @@ src/really_rally/
   core/
     config.py         # All tuning parameters — no external config files
     features.py       # FeatureEngine, SelfAdaptiveThreshold, RollingZScoreNormalizer, MovementTracker
+    candidate.py      # CoarseCandidateDetector (additive evidence), RallyStateMachine (hysteresis)
+    objects.py        # ObjectDetector contract, NullObjectDetector, BallTracker, registry
+    fusion.py         # EvidenceFusion — pose/racket/ball/temporal → rally confidence
     models.py         # RallySegment + ServeEvent dataclasses
     serve_detector.py # ServeDetector — pose-based serve FSM + confidence scoring
-    vision.py         # MotionDetector (pixel-diff), PoseExtractor (MediaPipe wrapper)
+    vision.py         # MotionDetector (pixel-diff), PoseExtractor (MediaPipe, cached)
   processors/
-    base.py           # TennisRallyProcessor — 2-pass pipeline, 3-state machine, export
+    base.py           # TennisRallyProcessor — 2-pass pipeline + optional Pass 3, export
     serve.py          # ServePracticeProcessor — drives ServeDetector, exports serve_events.csv
     feed.py           # FeedPracticeProcessor — pre-scan player scale, feeder rejection
   utils/
     media_io.py       # Video metadata extraction, filename generation
     telemetry.py      # Matplotlib 3/4-panel PNG plots
-    evaluate.py       # Temporal IoU precision/recall/F1 eval framework
+    evaluate.py       # Temporal IoU precision/recall/F1 + boundary error
 ```
 
+**Detection is coarse-to-fine.** Pass 1 finds motion, Pass 2 runs pose and the
+coarse candidate detector (`CoarseCandidateDetector` + `RallyStateMachine`),
+and the optional Pass 3 (`verify_candidate_windows`) runs object inference only
+inside the windows Pass 2 proposed. Expensive verification is never run over a
+whole video, and it is a no-op until an object backend is registered.
+
 Three processing modes inherit from `TennisRallyProcessor`:
-- **Rally**: 3-state temporal state machine (Idle → Potential → Active) with Z-scored adaptive thresholds
+- **Rally**: hysteresis state machine (Idle → Candidate → Active → Cooldown) fed by an additive coarse candidate score. Harder to start a rally (`RALLY_START_GAP_SEC`) than to continue one (`RALLY_CONTINUE_GAP_SEC`), so a single missed stroke no longer truncates a segment.
 - **Serve**: Pose-based finite-state machine (`ServeDetector`) that recognizes the toss → overhead-swing sequence: it infers handedness (toss arm rises first while the hitting arm is still down), then requires an overhead contact (high wrist velocity + raised arm) on the opposite arm within a temporal window. Emits `serve_events.csv` with per-serve handedness, toss/contact timestamps, and component scores. No ball/racket/court stream yet.
 - **Feed**: Pre-scan player scale calibration to reject coach/feeder near camera
 
@@ -66,7 +75,7 @@ ruff check src/
 Rally detection uses a 3-state machine with Z-scored adaptive thresholds:
 - **Z-score normalization** converts raw kinematic signals (arm_energy, whip_ratio) to unitless values via `RollingZScoreNormalizer` (causal sliding window)
 - **Robust adaptive threshold** uses P25 (not median) as baseline + k * MAD, with asymmetric EMA smoothing (slow rise 0.05, fast fall 0.3)
-- Stroke gate: `z_arm > t_arm AND z_whip > t_whip AND hip_vel > HIP_VELOCITY_STROKE_THRESHOLD AND spatial_variance >= SPATIAL_VARIANCE_STROKE_MIN`
+- Coarse candidate gate (additive, replaces the old AND-gate): each of arm/whip/hip/spatial evidence that clears its own threshold adds its weight to a score; `score >= COARSE_CANDIDATE_THRESHOLD` opens a candidate. One strong signal suffices — a body-rotation groundstroke whose `whip_ratio` collapses still fires on arm energy alone. Evidence must also clear `COARSE_MIN_ABS_ARM` / `COARSE_MIN_ABS_WHIP` in raw space.
 - Player distance gate: `PLAYER_HEIGHT_MIN <= player_height <= PLAYER_HEIGHT_MAX`
 
 All kinematic values are bbox-diagonal-normalized, so they are very small (arm_energy ~0-0.2, hip_vel ~0-0.05). The distance/velocity gates operate in this normalized space.
@@ -84,11 +93,13 @@ Handedness, toss time, and contact time are emitted per serve in `serve_events.c
 ## Gotchas
 
 - **MediaPipe must be < 0.11.0** — the legacy Solutions API was removed in 0.11+
+- **Pose weights are downloaded on first use for complexity 0/2** — the mediapipe wheel bundles only `pose_landmark_full.tflite` (the `MP_MODEL_COMPLEXITY = 1` model). Switching to 0 (lite) or 2 (heavy) triggers a one-time download from GitHub, which fails behind a TLS-inspecting proxy. `get_pose_extractor()` converts that into an actionable `RuntimeError`; the `REALLY_RALLY_ALLOW_INSECURE_SSL=1` escape hatch exists for this case and disables TLS verification process-wide, so use it only on trusted networks.
 - **FFmpeg required** on PATH for video export, concat, and metadata transfer
 - **First frame of concat** — `merge_clips` needs absolute paths in the concat list
 - **VFR videos** — iPhone footage is often variable framerate; `target_format` standardization is critical
 - **Adaptive threshold padding** — rest-gap zero-padding between motion segments keeps the MAD baseline from drifting upward during dense rallies
-- **`_mask_to_indices` / `_mask_to_segments`** — both exist in base.py; `_mask_to_indices` is the current one, `_mask_to_segments` is a duplicate (legacy from refactor)
+- **Z-score noise amplification** — the rolling Z-score is scale-free, so early in a clip (or when the 45s window is quiet) a numerically negligible arm energy (~0.0007) divides by a tiny window std and reaches z > 2. `COARSE_MIN_ABS_ARM` / `COARSE_MIN_ABS_WHIP` gate evidence in raw space to stop this. Thresholds alone cannot fix it.
+- **Pass 3 (object verification) is a no-op by default** — `NullObjectDetector` reports `available=False`, which fusion maps to a neutral 0.5. Racket/ball evidence only activates once a backend is installed via `core.objects.register_object_detector`.
 - **OpenCV seek + read** — `process_pixel_segment` uses `cap.set()` then `cap.read()` because some backends misbehave with `cap.retrieve()` after seeking
 - **Bbox-normalized values** — all velocities and energies are divided by the pose bounding-box diagonal. This makes hip_vel very small (max ~0.05) and arm_energy very small (max ~0.2). Thresholds must be tuned in this normalized space.
 - **player_height caps** — the upper bound was 0.28 (rejecting 97% of frames on real footage). Raised to 1.50 as a default; feed mode auto-calibrates via `estimate_player_scale()`.

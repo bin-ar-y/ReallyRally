@@ -1,6 +1,3 @@
-# RealRally
-A local, offline tool to automatically extract tennis rallies from practice videos. Designed for macOS (Apple Silicon) but compatible with oth     er platforms.
-=======
 # Tennis Rally Extractor
 
 A local, offline tool to automatically extract tennis rallies from practice videos. Designed for **macOS (Apple Silicon)** but compatible with other platforms.
