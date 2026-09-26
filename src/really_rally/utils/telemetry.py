@@ -1,15 +1,21 @@
 
+from really_rally.utils.feature_store import normalize_row
+
+
 def generate_telemetry_plot(metrics_data: list, fps: float, output_path: str):
     """
     Generates a 3-panel PNG plot of Arm Energy, Whip Ratio, and Player Scale
     over time based on the frame metrics.
-    
+
     Args:
-        metrics_data: List of dictionaries containing frame telemetry 
+        metrics_data: List of dictionaries containing frame telemetry
                      (smoothed_arm, smoothed_whip, player_height, etc.)
         fps: The effective framerate of the metrics data
         output_path: Where to save the generated PNG
     """
+    # Accepts both in-memory feature dicts and CSV rows (whose headers are
+    # Title_Case); without this the CSV path silently plotted nothing.
+    metrics_data = [normalize_row(row) for row in metrics_data]
     try:
         import matplotlib.pyplot as plt
     except ImportError:
@@ -94,6 +100,7 @@ def generate_evaluation_plot(
         pred_segments: List of (start_sec, end_sec) predicted intervals.
         output_path:   Where to save the PNG.
     """
+    metrics_data = [normalize_row(row) for row in metrics_data]
     try:
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches

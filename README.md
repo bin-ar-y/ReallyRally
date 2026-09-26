@@ -84,34 +84,65 @@ are `really-rally rally ...` and `really-rally-gui`.
 
 ### Output
 
-Each per-video artifact is prefixed with the source video's name, so processing
-several videos into one folder never silently overwrites earlier results.
+Results are grouped by mode and then by recording, so one folder holds
+everything about one video:
 
-Always written:
+```
+out/
+└── serve/                            # named after what was extracted
+    ├── 022626_Merged_Serves.mp4      # whole-batch merge (multi-video runs only)
+    ├── manifest.csv                  # every clip in the batch
+    └── IMG_1165/
+        ├── 092626_IMG_1165_serve.mp4 # this video's segments, merged
+        ├── serve.csv                 # start/end time of each clip
+        ├── features.csv              # full per-frame feature store
+        ├── debug_metrics.csv         # 18-column telemetry summary
+        ├── telemetry.png             # with --plot / the GUI checkbox (on by default)
+        ├── serve_events.csv          # serve mode only: handedness, toss/contact times
+        ├── labels.csv                # your ground truth        (written by the studio)
+        ├── predictions.csv           # detector output          (written by the studio)
+        ├── experiments.csv           # evaluated configurations (written by the studio)
+        └── clips/                    # with --split: the individual clips
+```
 
-| File | Contents |
-|---|---|
-| `<video>_debug_metrics.csv` | Per-frame telemetry — every gate decision is reconstructible from this |
-| `<video>_rallies.csv` (or `_serves.csv` / `_feeds.csv`) | Start/end time of each extracted clip |
-| `<video>_rally.mp4` | All segments merged into one summary video |
+Mode folders are `rally/`, `serve/` and `feed/`. The folder is the unit the
+Debug Studio opens — point it at `serve/IMG_1165/` and the video, telemetry,
+labels and predictions all load together.
 
-Also written:
-
-- `rallies.csv` — a run-level manifest covering every clip in the batch.
-- `<video>_serve_events.csv` — serve mode only: per-serve handedness, toss and contact timestamps, component scores.
-- `<video>_telemetry.png` — with `--plot` or the GUI checkbox (on by default): Arm Energy, Whip Ratio and Player Scale over time, with adaptive thresholds.
-- `<video>_rally/` — with `--split`: the individual clips.
+The three data files have different owners, and that separation is deliberate:
+`features.csv` is written by extraction, `predictions.csv` by the detector, and
+`labels.csv` by you. **Re-tuning the detector can never alter your labels**, so
+a labelled recording stays a valid regression test.
 
 At the end of a run the CLI prints an **output manifest** listing every file
 written and its location.
 
 ### Where to look when detection is wrong
 
-Open `<video>_telemetry.png` first. It shows the raw signals, the adaptive
-thresholds they are compared against, and the resulting decisions on a shared
-time axis, so a missed rally or a phantom one is usually visible directly.
-`<video>_debug_metrics.csv` carries the same data numerically, including
-`Coarse_Score`, `Candidate` and `State` per frame.
+Open the **Debug + Label Studio** — it is the fastest way to see *why* a
+decision was made, because it synchronises video, telemetry and detector state
+on one timeline:
+
+```bash
+# Open a finished run — video, telemetry, labels and predictions together
+really-rally studio --results out/serve/IMG_1165
+
+really-rally studio                       # or: python run.py studio
+really-rally studio --video IMG_1133.MOV  # just a video
+```
+
+Scrub to a suspicious moment, read the raw values next to the thresholds they
+were compared against and the evidence that fired, mark what actually happened,
+then tune a threshold and re-run detection **without re-analysing the video** —
+about 20 ms for a replay, versus minutes for a full pass.
+
+It reads `features.csv` from the recording's results folder, which the normal
+extraction run writes, so run `rally` / `serve` / `feed` first.
+
+See **[docs/STUDIO.md](docs/STUDIO.md)** for the keyboard map and workflow.
+
+`<video>_telemetry.png` remains the static summary for reports, and
+`<video>_debug_metrics.csv` carries the same data numerically.
 
 ## Configuration
 

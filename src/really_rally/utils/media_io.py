@@ -47,6 +47,53 @@ def get_video_date(video_path: str) -> str:
 
     return date_str
 
+def probe_video(video_path: str) -> dict:
+    """Read basic video metadata with OpenCV.
+
+    Single place for the fps/frame-count probe, so the studio and the CLI agree
+    on the numbers the frame<->time conversion depends on.
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {video_path}")
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+
+    # A container can report fps=0 or nan on malformed headers; a zero would
+    # make every time conversion a division by zero downstream.
+    if not fps or fps != fps:
+        fps = 30.0
+    return {
+        "fps": fps,
+        "frame_count": frame_count,
+        "width": width,
+        "height": height,
+        "duration": frame_count / fps if fps else 0.0,
+    }
+
+
+def frame_to_time(frame: int, fps: float) -> float:
+    """Frame index -> seconds. Frame index is the source of truth."""
+    return frame / fps if fps else 0.0
+
+
+def time_to_frame(time_sec: float, fps: float, total_frames: int = None) -> int:
+    """Seconds -> nearest frame index, clamped to the video when known."""
+    frame = int(round(time_sec * fps)) if fps else 0
+    if frame < 0:
+        return 0
+    if total_frames is not None and frame > total_frames - 1:
+        return max(0, total_frames - 1)
+    return frame
+
+
 def generate_rally_name(video_path: str) -> str:
     """
     Generates name in format: {Date(MMDDYY)}_{OriginalName}_rally

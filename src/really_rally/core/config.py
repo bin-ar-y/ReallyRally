@@ -136,3 +136,10 @@ SERVE_FORCED_HANDEDNESS = None   # None = infer per video, or 'left' / 'right'
 
 # --- Feed Mode ---
 FEED_HIP_VELOCITY_MIN = 0.005   # Min avg hip velocity for feed segments
+
+# --- Export ---
+# Per-clip encode budget. Input seeking (-ss before -i) means this is a genuine
+# ceiling rather than a race: a 3s clip encodes in about a second on an M1, so
+# hitting this means the source or disk is pathologically slow, not that the
+# clip is long.
+EXPORT_TIMEOUT_SEC = 180

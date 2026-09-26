@@ -109,7 +109,9 @@ def run_case(video: str, mode: str = "rally") -> Dict:
     clips = proc.process_video()
     elapsed = time.time() - t0
 
-    metrics_path = os.path.join(out, "debug_metrics.csv")
+    # Results land in <output>/<mode>/<video_stem>/; ask the processor rather
+    # than reconstructing the layout here, so it cannot drift.
+    metrics_path = os.path.join(proc.video_dir, "debug_metrics.csv")
     if not os.path.isfile(metrics_path):
         return {"video": os.path.basename(video), "error": "no debug_metrics.csv"}
 

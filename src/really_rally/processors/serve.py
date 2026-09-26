@@ -2,13 +2,11 @@ import csv
 import os
 from typing import List, Dict
 
-import numpy as np
-
 from really_rally.processors.base import TennisRallyProcessor
+from really_rally.core.detection import ServeAnalyzer
 from really_rally.core.models import RallySegment, ServeEvent
-from really_rally.core.serve_detector import ServeDetector
 from really_rally.utils.media_io import get_video_date
-from really_rally.core.config import PROCESS_EVERY_N_FRAMES
+from really_rally.core.config import SERVE_FORCED_HANDEDNESS, SERVE_LOCK_HANDEDNESS
 
 
 def generate_serve_name(video_path: str) -> str:
@@ -23,10 +21,11 @@ def generate_serve_name(video_path: str) -> str:
 class ServePracticeProcessor(TennisRallyProcessor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.output_folder_name = "serves"
-        self.output_csv_name = "serves.csv"
+        self.output_folder_name = "serve"
+        self.output_csv_name = "serve.csv"
         self.clip_prefix = "_serve_"
         self.serve_events: List[ServeEvent] = []
+        self._serve_analyzer: ServeAnalyzer = None
 
     def get_output_filename(self) -> str:
         """
@@ -35,61 +34,29 @@ class ServePracticeProcessor(TennisRallyProcessor):
         base_name = generate_serve_name(self.video_path)
         return f"{base_name}.mp4"
 
+    def _get_serve_analyzer(self) -> ServeAnalyzer:
+        if self._serve_analyzer is None:
+            self._serve_analyzer = ServeAnalyzer(
+                self.config_snapshot(),
+                lock_handedness=SERVE_LOCK_HANDEDNESS,
+                forced_handedness=SERVE_FORCED_HANDEDNESS,
+            )
+        return self._serve_analyzer
+
     def analyze_segment_data(self, frame_data: List[Dict]) -> List[RallySegment]:
         """
         Detect serves with the pose-based ServeDetector instead of the generic
         arm-energy/whip-ratio gating used by the rally mode.
+
+        Delegates to ``core.detection.ServeAnalyzer`` so a cached feature store
+        replays through the same code, exactly as the rally path does.
         """
         if not frame_data:
             return []
 
-        effective_fps = self.fps / PROCESS_EVERY_N_FRAMES
-
-        # Populate the same telemetry columns the rally path writes, so
-        # debug_metrics.csv is not left with empty Smoothed_Arm/State columns
-        # in serve mode (it previously reported zeros for every frame, which
-        # read as "no activity detected" when the detector was in fact fine).
-        arm_energies = np.array([d.get('arm_energy', 0.0) for d in frame_data])
-        whips = np.array([d.get('whip_ratio', 0.0) for d in frame_data])
-        window = max(1, int(effective_fps * 0.5))
-        kernel = np.ones(window) / window
-        smoothed_arm = np.convolve(arm_energies, kernel, mode='same')
-        smoothed_whip = np.convolve(whips, kernel, mode='same')
-
-        detector = ServeDetector(effective_fps)
-        events = detector.detect(frame_data)
-
-        serve_hit = np.zeros(len(frame_data), dtype=bool)
-        for ev in events:
-            serve_hit[ev.start_idx:ev.end_idx + 1] = True
-
-        for i, d in enumerate(frame_data):
-            d['smoothed_arm'] = smoothed_arm[i]
-            d['smoothed_whip'] = smoothed_whip[i]
-            d['t_arm'] = self.arm_adaptive.get_threshold()
-            d['t_whip'] = self.whip_adaptive.get_threshold()
-            d['z_arm'] = 0.0
-            d['z_whip'] = 0.0
-            d['coarse_score'] = 0.0
-            d['candidate'] = int(serve_hit[i])
-            d['state'] = 'serve' if serve_hit[i] else 'idle'
-            self.arm_adaptive.update(smoothed_arm[i])
-            self.whip_adaptive.update(smoothed_whip[i])
-
+        segments, events = self._get_serve_analyzer().analyze(frame_data)
         self.all_frame_metrics.extend(frame_data)
         self.serve_events.extend(events)
-
-        segments = []
-        for ev in events:
-            segments.append(
-                RallySegment(
-                    start_frame=int(ev.start_time * self.fps),
-                    end_frame=int(ev.end_time * self.fps),
-                    start_time=ev.start_time,
-                    end_time=ev.end_time,
-                    score=ev.score,
-                )
-            )
         return segments
 
     def export_clips(self, segments: List[RallySegment]) -> List[str]:

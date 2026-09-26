@@ -8,6 +8,161 @@ reasoning is not silently lost.
 
 ---
 
+## Unreleased — output layout and export reliability
+
+### Fixed — clip export timed out on long sessions
+
+`export_clips` passed `-ss`/`-to` *after* `-i`, which makes them output options:
+ffmpeg decoded the source **from frame 0** and discarded everything before the
+clip. Export cost therefore grew with the clip's position in the recording.
+
+Measured on a 146s serve clip, exporting a 2s segment:
+
+| Clip starts at | Before | After |
+|---|---|---|
+| 5s | 1.31s | 0.87s |
+| 40s | 4.75s | 0.92s |
+| 90s | 9.33s | 0.86s |
+| 140s | 13.94s | 0.83s |
+
+Against the hardcoded 120s timeout, a serve late in a long session could not
+finish — which is why `serve_032` exported and `serve_033` reported
+"ffmpeg timed out". Six clips spread across `serveclips/IMG_0901.mov`
+(including one at 142s) now export in 6.5s total instead of ~21s for the single
+latest one, and all six come out at exactly 2.601s, so input seeking is
+frame-accurate.
+
+`-ss` now precedes `-i` and `-t <duration>` replaces `-to <end>`, which is
+unambiguous where `-to` depends on where the seek landed. The timeout moved to
+`EXPORT_TIMEOUT_SEC` (180s) and its message now says what the clip was and that
+export continued, rather than leaving the user to guess.
+
+### Changed — results are grouped per recording
+
+Per-video artifacts used to land flat in the output directory, mixed with the
+merged video and a clips folder, so a batch produced dozens of prefixed files
+with no structure. Now:
+
+```
+<output>/<mode>/<video_stem>/     # rally | serve | feed
+    serve.mp4, serve.csv, features.csv, debug_metrics.csv,
+    telemetry.png, serve_events.csv, labels.csv, predictions.csv,
+    experiments.csv, clips/
+<output>/<mode>/Merged_*.mp4      # batch merge, multi-video runs only
+<output>/<mode>/manifest.csv      # batch clip index
+```
+
+- The folder is named after the extraction (`rally` / `serve` / `feed`) rather
+  than `rallies` / `serves` / `feeds`, and the per-file stem prefix is gone —
+  each recording has its own folder, so it was redundant.
+- The CLI default output is now the current directory, giving `./serve/IMG_1165/`
+  instead of a date-stamped bundle that had to be opened to see what was in it.
+- `studio/results_folder.py` resolves such a folder back into a session, and the
+  studio gained **Open results folder…** / `--results`. Pointing at a folder with
+  several recordings asks which one rather than picking arbitrarily; pointing at
+  a `clips/` subfolder resolves up to the recording that owns it, since an
+  individual clip does not share the recording's timeline.
+- `docs/STUDIO.md` and the README document the layout.
+
+No compatibility shim: the old flat paths are no longer written. `cli.py`,
+`gui.py`, `benchmarks/run_benchmark.py` and `benchmarks/gate_ablation.py` were
+updated, and the latter two now ask the processor for its paths rather than
+reconstructing the layout, so they cannot drift again.
+
+---
+
+## Unreleased — Debug + Label Studio
+
+An interactive workspace for synchronised debugging, ground-truth annotation and
+interactive detector tuning. The guiding constraint: **ground truth must never
+be written by the detector.**
+
+### Added — feature store
+
+- **`<video>_features.csv`** persists *every* `FeatureEngine` key per sampled
+  frame, not the 18-column subset `debug_metrics.csv` keeps. This is what makes
+  replay possible: the previous telemetry dump could not reproduce serve or feed
+  detection at all, because the per-arm pose features were never written down.
+- `Frame` is stored as an integer and is the source of truth for time. Motion
+  segment boundaries are recovered from gaps in it, so the replay engine can
+  rebuild per-segment detector state without a separate boundary column.
+
+### Added — Debug + Label Studio (`studio/`)
+
+- Time-synchronised workspace: dragging the playhead moves the video frame,
+  telemetry cursor, current-frame inspector and label track together.
+  Clicking telemetry seeks the video. Seeks are collapsed to the newest request,
+  so scrubbing cannot queue a backlog of stale frame decodes.
+- **Current-frame inspector** rendering values by role — raw, threshold, derived
+  score, decision, state — so `0.023` is never shown without the `0.249` bar it
+  failed to clear and the verdict that followed.
+- **Interactive telemetry** built from whatever keys the store contains; panels
+  are derived from the data, so a future racket/ball column appears with no UI
+  change.
+- **Annotation** with an interval + point vocabulary, autosaved to
+  `*_labels.csv`, with import/export of the existing `annotations.json` format.
+- **Config console** splitting parameters into replayable and
+  requires-re-analysis, and refusing (loudly) to apply the latter from cache.
+- **Evaluation** reusing `utils/evaluate.py`, plus a disagreement navigator that
+  jumps to each missed and invented rally with the detector's stated reason.
+- **Experiment history** in `*_experiments.csv`, with a comparison that reports
+  which labelled rallies were gained and lost, not just the aggregate score.
+
+### Added — launch surface
+
+- `really-rally studio [--video V] [--features F]` — a new CLI subcommand;
+  also reachable as `python run.py studio`.
+- `really-rally-studio` — a direct console script. It is declared in
+  `pyproject.toml`, so it only appears after `pip install -e .` is re-run; an
+  environment installed before the studio existed will not have it, which is why
+  the subcommand above is the documented entry point.
+- `pillow` is now a declared dependency (see Fixed).
+
+### Changed — detection extracted for replay
+
+`TennisRallyProcessor.analyze_segment_data` no longer contains detection logic.
+It is now a thin adapter over `core.detection.RallyAnalyzer`, which the studio's
+replay engine calls with the same arguments. A re-implementation would have
+drifted, so there is exactly one implementation and two callers.
+
+- Cross-segment adaptive state moved from processor attributes into
+  `AdaptiveState`, owned by an analyzer instance. The old class-level buffers
+  made it possible to leak thresholds between videos.
+- `CoarseCandidateDetector.score()`'s evidence list is no longer discarded; it
+  is persisted as `Fired_Signals` and is what makes a decision explainable.
+- `ServeAnalyzer` / `FeedAnalyzer` port the serve and feed paths the same way.
+  Their deliberate quirks are preserved: serve mode reads thresholds *before*
+  updating the buffers and does not pad rest gaps, unlike the rally path.
+- Verified by parity test: the extracted analyzer is compared against a frozen
+  copy of the pre-refactor implementation and must match exactly, including
+  segments, thresholds, scores and states.
+
+### Fixed
+
+- **`generate_evaluation_plot` silently produced nothing from a CSV.**
+  `telemetry.py` read lower-case in-memory keys while `cli.py` fed it
+  `csv.DictReader` rows carrying `Title_Case` headers, so every row was skipped
+  and the function returned after printing a warning. Both plot functions now
+  route rows through `feature_store.normalize_row`.
+- **A label deletion could destroy an interval.** Backspace deleted *every*
+  label touching the playhead, so removing a stroke point that sat on a rally
+  boundary also deleted the rally. It now removes one label, preferring points
+  over containing intervals.
+- **`pillow` was an undeclared dependency**, present only transitively via
+  customtkinter while the studio imports it directly. A clean install would have
+  failed on the first frame render; it is now listed in `pyproject.toml`.
+
+### Notes
+
+- 480 tests pass, up from 245. The new suites cover the feature store, config
+  snapshot, decision signals, frame inspector, annotation, replay, config
+  parsing, evaluation, and the studio's thread-safety invariant.
+- The studio's threading contract is enforced the same way the extraction GUI's
+  is: a source-lint test asserts `after()` appears only in the main-thread
+  poller, so a worker thread cannot start touching Tk later.
+
+---
+
 ## Unreleased — detection upgrade, output fixes, tooling
 
 ### Fixed — output files (data loss)

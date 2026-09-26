@@ -5,6 +5,7 @@ numpy>=1.24
 customtkinter>=5.2.2
 tkinterdnd2>=0.3.0
 matplotlib>=3.7
+pillow>=9.0
 
 [dev]
 pytest>=7.4

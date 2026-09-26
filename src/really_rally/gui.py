@@ -414,7 +414,10 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     processor = TennisRallyProcessor(first_video, self.output_dir)
                     summary = f"{len(all_clip_paths)} rally clip(s) extracted."
 
-                merged_path = processor.merge_clips(all_clip_paths, output_name)
+                # A batch merge spans videos, so it belongs in the mode folder
+                # rather than inside any one recording's folder.
+                merged_path = processor.merge_clips(
+                    all_clip_paths, output_name, dest_dir=processor.results_dir)
 
                 if merged_path:
                     self.log("Transferring metadata...", 1.0)
@@ -474,17 +477,21 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         return "\n".join(parts)
 
     def _write_batch_manifest(self, mode, rows):
-        """Write one clip manifest covering every video in this batch."""
-        csv_name = {
-            "Serving Practice": "serves.csv",
-            "Multiball Training": "feeds.csv",
-        }.get(mode, "rallies.csv")
-        path = os.path.join(self.output_dir, csv_name)
+        """Write one clip manifest covering every video in this batch.
+
+        Each video also writes its own manifest inside its results folder; this
+        one lists the whole batch, so it sits at the mode level.
+        """
+        folder = {
+            "Serving Practice": "serve",
+            "Multiball Training": "feed",
+        }.get(mode, "rally")
+        path = os.path.join(self.output_dir, folder, "manifest.csv")
         try:
             TennisRallyProcessor.write_clip_manifest(path, rows)
-            self.log(f"Wrote {csv_name}", 1.0)
+            self.log(f"Wrote {folder}/manifest.csv", 1.0)
         except Exception as exc:
-            print(f"Failed to write {csv_name}: {exc}")
+            print(f"Failed to write batch manifest: {exc}")
 
     def reset_ui(self):
         """Restore controls after a worker finishes (main thread only)."""

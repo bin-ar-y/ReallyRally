@@ -118,11 +118,11 @@ def run_detection(case: dict, output_dir: str) -> tuple:
             "realtime_factor": round(elapsed / duration, 3) if duration else None,
         }
 
-        # process_video() deliberately does not write the run-level manifest
-        # (that is the caller's job, so batches produce one file); write it here
-        # so the reported predictions match exactly what a CLI run would emit.
-        csv_name = {"rally": "rallies.csv", "serve": "serves.csv", "feed": "feeds.csv"}.get(mode, "rallies.csv")
-        csv_path = os.path.join(output_dir, csv_name)
+        # process_video() deliberately does not write the manifest (that is the
+        # caller's job, so batches produce one file); write it here so the
+        # reported predictions match exactly what a CLI run would emit. It goes
+        # in the video's results folder, alongside the video it describes.
+        csv_path = os.path.join(processor.video_dir, processor.output_csv_name)
         processor.write_clip_manifest(csv_path, processor.exported_clip_rows)
 
         if processor.exported_clip_rows:

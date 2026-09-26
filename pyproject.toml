@@ -35,6 +35,10 @@ dependencies = [
     "customtkinter>=5.2.2",
     "tkinterdnd2>=0.3.0",
     "matplotlib>=3.7",
+    # Imported directly by the Debug Studio for frame rendering. It arrives
+    # transitively with customtkinter today, but relying on that is how a clean
+    # install breaks.
+    "pillow>=9.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +51,7 @@ dev = [
 [project.scripts]
 really-rally = "really_rally.cli:main"
 really-rally-gui = "really_rally.gui:main"
+really-rally-studio = "really_rally.studio.app:main"
 
 [project.urls]
 Homepage = "https://github.com/bin-ar-y/really-rally"
