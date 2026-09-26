@@ -36,7 +36,10 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self._ui_queue = queue.Queue()
         self._worker = None
         self.processing_mode = tk.StringVar(value="Rally Extraction")
-        self.plot_var = tk.BooleanVar(value=False)
+        # On by default: the telemetry plot is the only way to see *why* a
+        # segment was accepted or rejected, and it was previously easy to run a
+        # batch and find no plot at all.
+        self.plot_var = tk.BooleanVar(value=True)
 
         # Enable Drag and Drop for the window
         self.drop_target_register(DND_FILES)
@@ -301,6 +304,8 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             all_clip_paths = []
             serve_events = []
+            manifest_rows = []
+            written_artifacts = []
 
             # Tell the user work has begun before the first slow step (probing
             # the container and building the MediaPipe graph).
@@ -375,6 +380,9 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     break
 
                 all_clip_paths.extend(clips)
+                # Collect rows for one run-level manifest covering the batch.
+                manifest_rows.extend(processor.exported_clip_rows)
+                written_artifacts.extend(processor.artifacts())
                 if self.processing_mode.get() == "Serving Practice":
                     serve_events.extend(processor.serve_events)
 
@@ -385,6 +393,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
 
             mode = self.processing_mode.get()
+            self._write_batch_manifest(mode, manifest_rows)
 
             if all_clip_paths:
                 self.log(f"Merging {len(all_clip_paths)} clips...", 1.0)
@@ -412,7 +421,17 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     processor.transfer_metadata(first_video, merged_path)
 
                     self.log("Done!", 1.0)
-                    msg = f"Processing Complete!\n\n{summary}\n\nSaved to:\n{merged_path}"
+                    # Tell the user exactly which data files were written, not
+                    # just where the video landed.
+                    unique = sorted({os.path.basename(p) for p in written_artifacts})
+                    data_note = ""
+                    if unique:
+                        shown = unique[:8]
+                        extra = f"\n  ...and {len(unique) - len(shown)} more" if len(unique) > len(shown) else ""
+                        data_note = ("\n\nData files in the same folder:\n  "
+                                     + "\n  ".join(shown) + extra)
+                    msg = (f"Processing Complete!\n\n{summary}\n\nSaved to:\n{merged_path}"
+                           f"{data_note}")
                     self._notify("info", "Success", msg)
                     # Reveal in Finder without blocking the worker.
                     subprocess.Popen(["open", "-R", merged_path])
@@ -453,6 +472,19 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             parts.append("(" + ", ".join(handed) + ")")
         parts.append("See serve_events.csv for toss/contact timestamps.")
         return "\n".join(parts)
+
+    def _write_batch_manifest(self, mode, rows):
+        """Write one clip manifest covering every video in this batch."""
+        csv_name = {
+            "Serving Practice": "serves.csv",
+            "Multiball Training": "feeds.csv",
+        }.get(mode, "rallies.csv")
+        path = os.path.join(self.output_dir, csv_name)
+        try:
+            TennisRallyProcessor.write_clip_manifest(path, rows)
+            self.log(f"Wrote {csv_name}", 1.0)
+        except Exception as exc:
+            print(f"Failed to write {csv_name}: {exc}")
 
     def reset_ui(self):
         """Restore controls after a worker finishes (main thread only)."""

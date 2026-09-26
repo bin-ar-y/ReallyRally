@@ -44,6 +44,14 @@ class TennisRallyProcessor:
 
         self.all_frame_metrics = []
 
+        # Per-video artifacts are named after the source video. A batch run
+        # sharing one output directory would otherwise overwrite every earlier
+        # video's telemetry with the last one's, silently losing the data.
+        self.video_stem = os.path.splitext(os.path.basename(video_path))[0]
+        # Rows for the run-level manifest; collected here so the caller can
+        # write one aggregate file instead of appending to it forever.
+        self.exported_clip_rows = []
+
         print(f"Video info: {self.width}x{self.height} @ {self.fps}fps, {self.total_frames} frames")
         
         # Initialize Detectors
@@ -309,6 +317,34 @@ class TennisRallyProcessor:
         strokes = sum(1 for i, v in enumerate(mask) if v and (i == 0 or not mask[i - 1]))
         return min(1.0, strokes / 4.0)
 
+    def artifacts(self) -> List[str]:
+        """Absolute paths of the per-video files this run wrote (or would write)."""
+        names = [
+            f"{self.video_stem}_debug_metrics.csv",
+            f"{self.video_stem}_{self.output_csv_name}",
+        ]
+        if self.generate_plot:
+            names.append(f"{self.video_stem}_telemetry.png")
+        return [
+            os.path.join(self.output_dir, n)
+            for n in names
+            if os.path.exists(os.path.join(self.output_dir, n))
+        ]
+
+    def print_output_manifest(self):
+        """List what was written where, so outputs are never a guessing game."""
+        files = self.artifacts()
+        if not files:
+            return
+        print("\n--- Output files ---")
+        for path in files:
+            size = os.path.getsize(path)
+            print(f"  {os.path.basename(path):<44s} {size/1024:8.1f} KB")
+            print(f"      {os.path.dirname(path)}")
+        if not self.generate_plot:
+            print("  (no telemetry plot: re-run with --plot, or tick "
+                  "'Generate Telemetry Plot' in the GUI)")
+
     def run(self):
         """
         Main execution pipeline.
@@ -316,18 +352,22 @@ class TennisRallyProcessor:
         # 1. Extract Rallies
         clip_paths = self.process_video()
         
+        # Run-level manifest over this video's clips (fresh, never appended).
+        aggregate_csv = os.path.join(self.output_dir, self.output_csv_name)
+        self.write_clip_manifest(aggregate_csv, self.exported_clip_rows)
+
         # 2. Merge and Transfer Metadata (if clips were found)
         if clip_paths:
             print(f"\nMerging {len(clip_paths)} clips into single summary...")
-            
+
             output_filename = self.get_output_filename()
             merged_path = self.merge_clips(clip_paths, output_filename)
-            
+
             if merged_path:
                 print(f"Transferring metadata to {merged_path}...")
                 self.transfer_metadata(self.video_path, merged_path)
                 print(f"Done! Summary video: {merged_path}")
-                
+
                 if not self.keep_clips:
                     print("Cleaning up individual clips (use --split to keep them)...")
                     import shutil
@@ -336,6 +376,8 @@ class TennisRallyProcessor:
                         shutil.rmtree(rallies_dir)
         else:
             print("No rallies detection met the criteria.")
+
+        self.print_output_manifest()
 
     def process_video(self) -> List[str]:
         """
@@ -386,7 +428,7 @@ class TennisRallyProcessor:
 
         # Export Debug Data
         if self.all_frame_metrics:
-            debug_csv = os.path.join(self.output_dir, "debug_metrics.csv")
+            debug_csv = os.path.join(self.output_dir, f"{self.video_stem}_debug_metrics.csv")
             try:
                 with open(debug_csv, "w", newline="") as f:
                     writer = csv.writer(f)
@@ -418,7 +460,7 @@ class TennisRallyProcessor:
                 if self.generate_plot:
                     try:
                         from really_rally.utils.telemetry import generate_telemetry_plot
-                        png_path = os.path.join(self.output_dir, "movement_telemetry.png")
+                        png_path = os.path.join(self.output_dir, f"{self.video_stem}_telemetry.png")
                         generate_telemetry_plot(self.all_frame_metrics, self.fps, png_path)
                     except Exception as e:
                         print(f"Failed to generate telemetry plot: {e}")
@@ -657,73 +699,86 @@ class TennisRallyProcessor:
         runs_dir = os.path.join(self.output_dir, self.output_folder_name)
         os.makedirs(runs_dir, exist_ok=True)
         
-        # CSV Export
-        csv_path = os.path.join(self.output_dir, self.output_csv_name)
-        # Use append mode if file exists? Or just overwrite?
-        # For multi-video batch processing, we might be overwriting a single CSV.
-        # Ideally, we'd want a separate CSV or append. 
-        # But for now let's just focus on the clips.
-        
-        video_stem = os.path.splitext(os.path.basename(self.video_path))[0]
+        video_stem = self.video_stem
 
-        with open(csv_path, 'a' if os.path.exists(csv_path) else 'w', newline='') as f:
-            writer = csv.writer(f)
-            if f.tell() == 0:
-                writer.writerow(["Source Video", "Clip", "Start Time", "End Time", "Duration"])
-            
-            for i, seg in enumerate(segments):
-                # Cancellation boundary: stop between clips, never mid-encode.
-                if self.stop_event and self.stop_event.is_set():
-                    print("Export stopped by user.")
-                    break
+        # Per-video manifest, always written fresh. The run-level aggregate is
+        # written separately (see write_clip_manifest) so that re-running never
+        # appends a second copy of the same rows.
+        self.exported_clip_rows = []
 
-                # Unique name: {VideoStem}_rally_{i+1:03d}_{uuid}.mp4
-                import uuid
-                unique_suffix = str(uuid.uuid4())[:8]
-                clip_name = f"{video_stem}{self.clip_prefix}{i+1:03d}_{unique_suffix}.mp4"
-                clip_path = os.path.join(runs_dir, clip_name)
-                
-                writer.writerow([video_stem, clip_name, f"{seg.start_time:.2f}", f"{seg.end_time:.2f}", f"{seg.duration:.2f}"])
-                
-                # ffmpeg command
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", self.video_path,
-                    "-ss", f"{seg.start_time:.3f}",
-                    "-to", f"{seg.end_time:.3f}",
-                ]
-                
-                # Format Standardization
-                if self.target_format:
-                    t_w = self.target_format['width']
-                    t_h = self.target_format['height']
-                    t_fps = self.target_format['fps']
-                    
-                    # Scale to fit within target box, keeping aspect ratio, and pad with black
-                    # force_original_aspect_ratio=decrease insures it fits INSIDE the box
-                    # pad fills the rest
-                    vf_filter = f"scale={t_w}:{t_h}:force_original_aspect_ratio=decrease,pad={t_w}:{t_h}:(ow-iw)/2:(oh-ih)/2"
-                    cmd.extend(["-vf", vf_filter, "-r", str(t_fps)])
-                    
-                cmd.extend([
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                    "-video_track_timescale", "90000",
-                    "-c:a", "aac",
-                    clip_path
-                ])
-                
-                # Check for errors?
-                try:
-                    res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120)
-                    if res.returncode != 0:
-                        print(f"Warning: ffmpeg failed for {clip_name}. Stderr: {res.stderr.decode()}")
-                    else:
-                        print(f"Exported {clip_name} ({seg.duration:.1f}s)")
-                        clip_paths.append(clip_path)
-                except subprocess.TimeoutExpired:
-                     print(f"Error: ffmpeg timed out exporting {clip_name}")
-                    
+        for i, seg in enumerate(segments):
+            # Cancellation boundary: stop between clips, never mid-encode.
+            if self.stop_event and self.stop_event.is_set():
+                print("Export stopped by user.")
+                break
+
+            # Unique name: {VideoStem}_rally_{i+1:03d}_{uuid}.mp4
+            import uuid
+            unique_suffix = str(uuid.uuid4())[:8]
+            clip_name = f"{video_stem}{self.clip_prefix}{i+1:03d}_{unique_suffix}.mp4"
+            clip_path = os.path.join(runs_dir, clip_name)
+
+            self.exported_clip_rows.append(
+                [video_stem, clip_name, f"{seg.start_time:.2f}",
+                 f"{seg.end_time:.2f}", f"{seg.duration:.2f}"]
+            )
+
+            # ffmpeg command
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", self.video_path,
+                "-ss", f"{seg.start_time:.3f}",
+                "-to", f"{seg.end_time:.3f}",
+            ]
+
+            # Format Standardization
+            if self.target_format:
+                t_w = self.target_format['width']
+                t_h = self.target_format['height']
+                t_fps = self.target_format['fps']
+
+                # Scale to fit within target box, keeping aspect ratio, and pad with black
+                # force_original_aspect_ratio=decrease insures it fits INSIDE the box
+                # pad fills the rest
+                vf_filter = f"scale={t_w}:{t_h}:force_original_aspect_ratio=decrease,pad={t_w}:{t_h}:(ow-iw)/2:(oh-ih)/2"
+                cmd.extend(["-vf", vf_filter, "-r", str(t_fps)])
+
+            cmd.extend([
+                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-video_track_timescale", "90000",
+                "-c:a", "aac",
+                clip_path
+            ])
+
+            try:
+                res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=120)
+                if res.returncode != 0:
+                    print(f"Warning: ffmpeg failed for {clip_name}. Stderr: {res.stderr.decode()}")
+                else:
+                    print(f"Exported {clip_name} ({seg.duration:.1f}s)")
+                    clip_paths.append(clip_path)
+            except subprocess.TimeoutExpired:
+                print(f"Error: ffmpeg timed out exporting {clip_name}")
+
+        # Per-video manifest (fresh every run).
+        csv_path = os.path.join(self.output_dir, f"{video_stem}_{self.output_csv_name}")
+        self.write_clip_manifest(csv_path, self.exported_clip_rows)
+
         return clip_paths
+
+    @staticmethod
+    def write_clip_manifest(csv_path: str, rows: List[List[str]]) -> None:
+        """Write a clip manifest, replacing any previous contents.
+
+        Deliberately not append mode: clip filenames carry a fresh uuid on every
+        run, so appending left earlier runs' rows behind forever, describing
+        files that had already been deleted.
+        """
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Source Video", "Clip", "Start Time", "End Time", "Duration"])
+            writer.writerows(rows)
 
     def merge_clips(self, clip_paths: List[str], output_name: str) -> Optional[str]:
         """Merges multiple clips into one using ffmpeg concat demuxer."""

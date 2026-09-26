@@ -67,12 +67,16 @@ class ServePracticeProcessor(TennisRallyProcessor):
         return clip_paths
 
     def _export_serve_events_csv(self):
-        """Write rich per-serve metadata (biomechanical event timestamps)."""
+        """Write rich per-serve metadata (biomechanical event timestamps).
+
+        Named after the source video: in a batch run every video writes here,
+        and a fixed name would leave only the last video's serves on disk.
+        """
         if not self.serve_events:
             return
 
-        csv_path = os.path.join(self.output_dir, "serve_events.csv")
-        video_stem = os.path.splitext(os.path.basename(self.video_path))[0]
+        csv_path = os.path.join(self.output_dir, f"{self.video_stem}_serve_events.csv")
+        video_stem = self.video_stem
 
         header = [
             "Source Video", "Handedness", "Toss Arm",
@@ -100,3 +104,10 @@ class ServePracticeProcessor(TennisRallyProcessor):
                     ev.outcome,
                 ])
         print(f"[Serve] Exported per-serve metadata to {csv_path}")
+
+    def artifacts(self):
+        files = super().artifacts()
+        events = os.path.join(self.output_dir, f"{self.video_stem}_serve_events.csv")
+        if os.path.exists(events):
+            files.append(events)
+        return files
