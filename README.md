@@ -64,54 +64,150 @@ Run the script on your video file:
 # Activate virtual environment first
 source .venv/bin/activate
 
-# Default: Creates output folder named after video (e.g., ./my_match/)
-python3 extract_rallies.py /path/to/my_match.mp4
+# Rally practice
+python3 run.py rally /path/to/my_match.mp4
 
+# Serve practice
+python3 run.py serve /path/to/my_serves.mov
 
-# Custom Output Location:
-python3 extract_rallies.py /path/to/your/video.mp4 --output /path/to/output_folder
+# Multiball / coach feeding
+python3 run.py feed /path/to/feeding.mp4
 
-# Keep Individual Clips (Default is Merged Video Only):
-python3 extract_rallies.py /path/to/your/video.mp4 --split
+# Options (any mode)
+#   --output DIR   write somewhere other than ./<date>_<video>_<mode>/
+#   --split        keep the individual clips as well as the merged video
+#   --plot         write a telemetry PNG
 ```
+
+If you installed the package with `pip install -e .`, the equivalent commands
+are `really-rally rally ...` and `really-rally-gui`.
 
 ### Output
-The tool will always create:
-- `output_folder/{VideoName}_rallies.mp4`: A single video file combining all extracted rallies (e.g., `my_match_rallies.mp4`).
-- `output_folder/rallies.csv`: CSV file identifying start/end times.
-- `output_folder/debug_metrics.csv`: Raw telemetry data for each frame.
 
-If you enable the **Telemetry Plot** option (`--plot` in CLI or checkbox in GUI):
-- `output_folder/movement_telemetry.png`: A graph showing Arm Energy, Whip Ratio, and Player Scale timelines for visual analysis of the extraction decisions.
+Each per-video artifact is prefixed with the source video's name, so processing
+several videos into one folder never silently overwrites earlier results.
 
-If you use `--split`, it will ALSO keep:
-- `output_folder/rallies/`: Folder containing individual `.mp4` clips.
+Always written:
+
+| File | Contents |
+|---|---|
+| `<video>_debug_metrics.csv` | Per-frame telemetry — every gate decision is reconstructible from this |
+| `<video>_rallies.csv` (or `_serves.csv` / `_feeds.csv`) | Start/end time of each extracted clip |
+| `<video>_rally.mp4` | All segments merged into one summary video |
+
+Also written:
+
+- `rallies.csv` — a run-level manifest covering every clip in the batch.
+- `<video>_serve_events.csv` — serve mode only: per-serve handedness, toss and contact timestamps, component scores.
+- `<video>_telemetry.png` — with `--plot` or the GUI checkbox (on by default): Arm Energy, Whip Ratio and Player Scale over time, with adaptive thresholds.
+- `<video>_rally/` — with `--split`: the individual clips.
+
+At the end of a run the CLI prints an **output manifest** listing every file
+written and its location.
+
+### Where to look when detection is wrong
+
+Open `<video>_telemetry.png` first. It shows the raw signals, the adaptive
+thresholds they are compared against, and the resulting decisions on a shared
+time axis, so a missed rally or a phantom one is usually visible directly.
+`<video>_debug_metrics.csv` carries the same data numerically, including
+`Coarse_Score`, `Candidate` and `State` per frame.
 
 ## Configuration
-You can adjust the sensitivity and constraints by editing the **CONFIGURATION** section at `src/really_rally/core/config.py`.
 
-**Current Tuned Values (Self-Adaptive Thresholding):**
+All tunable parameters live in `src/really_rally/core/config.py` — there are no
+external config files. The ones worth knowing:
+
 ```python
-ADAPTIVE_WINDOW_SEC = 30.0      # Sliding window for resting baseline
-ARM_ENERGY_K_MULTIPLIER = 4.0   # Sensitivity multiplier for MAD
-WHIP_RATIO_K_MULTIPLIER = 4.0   # Sensitivity multiplier for MAD
-RALLY_MAX_STROKE_GAP_SEC = 7.0  # Max time between strokes (t_max)
+# Adaptive thresholding
+ADAPTIVE_WINDOW_SEC = 45.0        # Sliding window for the resting baseline
+ARM_ENERGY_K_MULTIPLIER = 2.5     # Sensitivity (P25 + k*MAD)
+WHIP_RATIO_K_MULTIPLIER = 2.5
+MIN_ENERGY_FLOOR = 0.25           # Absolute floor, in Z-score space
+
+# Coarse candidate detection (additive, one strong signal is enough)
+COARSE_CANDIDATE_THRESHOLD = 2.0
+COARSE_MIN_ABS_ARM = 0.005        # Raw-space floor; stops Z-score noise amplification
+COARSE_MIN_ABS_WHIP = 0.3
+
+# Rally continuation — harder to START a rally than to CONTINUE one
+RALLY_START_GAP_SEC = 7.0         # Two strokes within this window confirm a rally
+RALLY_CONTINUE_GAP_SEC = 11.0     # An active rally tolerates a gap this long
+
+# Serve
+SERVE_LOCK_HANDEDNESS = True      # One serving hand per video
+SERVE_FORCED_HANDEDNESS = None    # None = infer; or 'left' / 'right'
+
+# Pose
+MP_MODEL_COMPLEXITY = 1           # 0=Lite, 1=Full, 2=Heavy (see note below)
+POSE_DROPOUT_BRIDGE_STEPS = 3     # Bridge short tracking dropouts
 ```
 
+> **Note on `MP_MODEL_COMPLEXITY`:** the mediapipe wheel bundles only the
+> `full` (1) model. Setting it to 0 or 2 makes MediaPipe download the lite/heavy
+> weights from GitHub on first use, which fails behind a TLS-inspecting proxy.
+> See Troubleshooting.
+
 ## How it Works
-1.  **Pre-Motion Detection**: Checks pixel differences first. Skips "Empty Scenes" instantly.
-2.  **Pose Extraction**: Uses Google MediaPipe to track the player's skeleton.
-3.  **Feature Analysis**: Extracts kinematic features (Arm Energy, Whip Ratio) normalized by Torso Length to account for perspective shifts.
-4.  **Self-Adaptive Thresholding**: Maintains a 30-second rolling buffer of resting states using statistical Median and Median Absolute Deviation (MAD) to adjust action thresholds dynamically based on the current camera layout.
-5.  **State Machine Logic**: Detects rallies using a 3-State Temporal Logic gate (Idle -> Potential Rally -> Active Rally). Rallies are kept alive if consecutive strokes are detected within a 7.0-second timeout.
-6.  **Export**: Saves segments and clips using FFmpeg.
+
+Detection is **coarse-to-fine**: cheap signals propose candidates generously,
+and only candidates get expensive verification.
+
+1. **Pre-motion scan** — downscaled pixel differencing skips empty scenes.
+2. **Pose extraction** — MediaPipe tracks the player's skeleton on 360p frames.
+3. **Feature analysis** — kinematic features (Arm Energy, Whip Ratio, hip
+   velocity, spatial variance), normalized by the pose bounding-box diagonal so
+   they are comparable across camera distances.
+4. **Adaptive thresholding** — a rolling Z-score normalizes each signal against
+   its own local baseline, then a robust P25 + k·MAD threshold adapts to the
+   camera. Evidence must *also* clear an absolute raw-space floor, because a
+   scale-free Z-score will otherwise amplify numerical noise into a "strong"
+   signal on quiet stretches.
+5. **Coarse candidate detection** — each signal above its threshold adds
+   weighted evidence to a score. One strong signal is enough to open a
+   candidate; there is no requirement for all of them to fire at once.
+6. **Hysteresis state machine** — `Idle → Candidate → Active → Cooldown`.
+   Confirming a rally takes two strokes within `RALLY_START_GAP_SEC`; continuing
+   one tolerates `RALLY_CONTINUE_GAP_SEC`, so a single missed stroke does not
+   cut the segment short.
+7. **(Optional) object verification** — racket and ball detection over candidate
+   windows only, fused with pose and temporal evidence. Ships disabled: with no
+   detector registered this step is a no-op and behaviour is pose-only.
+8. **Export** — segments are cut and merged with FFmpeg.
+
+## Evaluation
+
+The project ships an evaluation harness, but **`benchmarks/cases/` is empty** —
+there is no hand-labelled ground truth yet, so published recall and precision
+figures are label-free proxies rather than real measurements.
+
+- **[docs/LABELLING.md](docs/LABELLING.md)** — how to label clips (about 5–10
+  minutes each, five clips is enough to produce meaningful numbers).
+- `python benchmarks/label.py --status` — see which cases still need labels.
+- `python benchmarks/run_benchmark.py` — recall, precision, F1, boundary error
+  and runtime.
 
 ## Troubleshooting
-- **Rallies missed?** 
-    - Decrease `ARM_ENERGY_K_MULTIPLIER` (e.g., to 3.0) or increase `RALLY_MAX_STROKE_GAP_SEC`.
-- **Ball picking included?** 
-    - Increase `ARM_ENERGY_K_MULTIPLIER` (e.g., to 5.0) to make the threshold more strict against noise.
+
+- **Rallies missed?**
+  - Lower `COARSE_CANDIDATE_THRESHOLD`, or raise `RALLY_CONTINUE_GAP_SEC`.
+  - Check whether the rally appears at all in the pre-motion scan; a very still
+    player can be filtered before pose estimation ever runs.
+- **Ball picking or walking included?**
+  - Raise `COARSE_CANDIDATE_THRESHOLD` and/or `COARSE_MIN_ABS_ARM`.
+- **Serve detection finds nothing?**
+  - Run with `--plot` and check whether the wrist ever rises above the
+    shoulder in the telemetry. If it does not, the camera angle is likely
+    hiding the toss.
+- **Telemetry plot missing?**
+  - It is only written with `--plot` (CLI) or the "Generate Telemetry Plot"
+    checkbox (GUI, on by default).
+- **"MediaPipe could not load the pose model"?**
+  - Only the `full` model ships inside the wheel; complexity 0 and 2 are
+    downloaded on first use. Either set `MP_MODEL_COMPLEXITY = 1`, fix your
+    certificate chain, or (trusted networks only) set
+    `REALLY_RALLY_ALLOW_INSECURE_SSL=1`.
 - **MediaPipe Import Error?**
-    - Ensure you have installed `mediapipe<0.11.0`. Newer versions (0.11+) have changed the API structure.
-    - The script includes a check for this and will suggest fixes if it fails.
+  - Ensure you have installed `mediapipe<0.11.0`. Newer versions (0.11+) have
+    changed the API structure.
 

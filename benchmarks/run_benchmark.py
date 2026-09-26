@@ -118,12 +118,16 @@ def run_detection(case: dict, output_dir: str) -> tuple:
             "realtime_factor": round(elapsed / duration, 3) if duration else None,
         }
 
-        # Find the output CSV
+        # process_video() deliberately does not write the run-level manifest
+        # (that is the caller's job, so batches produce one file); write it here
+        # so the reported predictions match exactly what a CLI run would emit.
         csv_name = {"rally": "rallies.csv", "serve": "serves.csv", "feed": "feeds.csv"}.get(mode, "rallies.csv")
         csv_path = os.path.join(output_dir, csv_name)
-        if os.path.isfile(csv_path):
+        processor.write_clip_manifest(csv_path, processor.exported_clip_rows)
+
+        if processor.exported_clip_rows:
             return csv_path, timing
-        print(f"    Warning: no {csv_name} produced (no segments detected)")
+        print(f"    No {mode} segments detected")
         return None, timing
     except Exception as e:
         print(f"    Error: {e}")
@@ -162,8 +166,14 @@ def print_summary(all_results: List[Dict]):
     print("=" * 80)
 
     for r in all_results:
-        best = r["thresholds"]["iou_0.3"]
         print(f"\n  {r['name']}  [{r['mode']}]  (GT={r['num_gt']}, Pred={r['num_pred']})")
+        if not r.get("thresholds"):
+            # No predictions at all: every ground-truth rally is a false negative.
+            reason = r.get("error", "no predictions")
+            print(f"    No scorable output ({reason}). "
+                  f"{r['num_gt']} ground-truth segment(s) all missed.")
+            continue
+        best = r["thresholds"]["iou_0.3"]
         print(f"    IoU=0.3 →  P={best['precision']:.3f}  R={best['recall']:.3f}  F1={best['f1']:.3f}  |  TP={best['tp']} FP={best['fp']} FN={best['fn']}")
         print(f"    Boundary err → start {best['boundary_start_error_sec']:.2f}s, "
               f"end {best['boundary_end_error_sec']:.2f}s")
