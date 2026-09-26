@@ -125,5 +125,14 @@ SERVE_TOSS_MIN_SCORE = 0.5
 SERVE_CONTACT_MIN_SCORE = 0.5
 SERVE_MIN_SCORE = 0.55
 
+# Handedness locking.
+# A player serves with one hand for a whole session. Per-serve inference can
+# still flip — one mis-associated toss/contact pair reads as the opposite hand —
+# which is physically implausible and makes the CSV inconsistent. When locking
+# is on, the dominant hand is chosen once per video (score-weighted majority)
+# and applied to every event.
+SERVE_LOCK_HANDEDNESS = True
+SERVE_FORCED_HANDEDNESS = None   # None = infer per video, or 'left' / 'right'
+
 # --- Feed Mode ---
 FEED_HIP_VELOCITY_MIN = 0.005   # Min avg hip velocity for feed segments

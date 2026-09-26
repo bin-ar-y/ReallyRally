@@ -2,6 +2,8 @@ import csv
 import os
 from typing import List, Dict
 
+import numpy as np
+
 from really_rally.processors.base import TennisRallyProcessor
 from really_rally.core.models import RallySegment, ServeEvent
 from really_rally.core.serve_detector import ServeDetector
@@ -42,8 +44,37 @@ class ServePracticeProcessor(TennisRallyProcessor):
             return []
 
         effective_fps = self.fps / PROCESS_EVERY_N_FRAMES
+
+        # Populate the same telemetry columns the rally path writes, so
+        # debug_metrics.csv is not left with empty Smoothed_Arm/State columns
+        # in serve mode (it previously reported zeros for every frame, which
+        # read as "no activity detected" when the detector was in fact fine).
+        arm_energies = np.array([d.get('arm_energy', 0.0) for d in frame_data])
+        whips = np.array([d.get('whip_ratio', 0.0) for d in frame_data])
+        window = max(1, int(effective_fps * 0.5))
+        kernel = np.ones(window) / window
+        smoothed_arm = np.convolve(arm_energies, kernel, mode='same')
+        smoothed_whip = np.convolve(whips, kernel, mode='same')
+
         detector = ServeDetector(effective_fps)
         events = detector.detect(frame_data)
+
+        serve_hit = np.zeros(len(frame_data), dtype=bool)
+        for ev in events:
+            serve_hit[ev.start_idx:ev.end_idx + 1] = True
+
+        for i, d in enumerate(frame_data):
+            d['smoothed_arm'] = smoothed_arm[i]
+            d['smoothed_whip'] = smoothed_whip[i]
+            d['t_arm'] = self.arm_adaptive.get_threshold()
+            d['t_whip'] = self.whip_adaptive.get_threshold()
+            d['z_arm'] = 0.0
+            d['z_whip'] = 0.0
+            d['coarse_score'] = 0.0
+            d['candidate'] = int(serve_hit[i])
+            d['state'] = 'serve' if serve_hit[i] else 'idle'
+            self.arm_adaptive.update(smoothed_arm[i])
+            self.whip_adaptive.update(smoothed_whip[i])
 
         self.all_frame_metrics.extend(frame_data)
         self.serve_events.extend(events)

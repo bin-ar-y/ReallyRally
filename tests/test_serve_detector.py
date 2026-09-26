@@ -2,6 +2,7 @@
 
 import pytest
 
+from really_rally.core.models import ServeEvent
 from really_rally.core.serve_detector import ServeDetector, _runs
 from really_rally.core.features import FeatureEngine, _joint_angle
 
@@ -152,3 +153,64 @@ class TestPerArmFeatures:
         b = np.array([0.0, 1.0])
         c = np.array([1.0, 1.0])
         assert _joint_angle(a, b, c) == pytest.approx(90.0, abs=0.01)
+
+
+class TestHandednessLocking:
+    """A player serves with one hand for a whole session.
+
+    Per-serve inference can flip when a toss/contact pair is mis-associated,
+    which is physically implausible and makes serve_events.csv inconsistent.
+    """
+
+    @staticmethod
+    def _event(hand, score, t):
+        return ServeEvent(
+            start_idx=0, end_idx=10, start_time=t, end_time=t + 2.0, score=score,
+            handedness=hand, toss_arm="left" if hand == "right" else "right",
+            toss_idx=1, contact_idx=5,
+        )
+
+    def test_dominant_hand_applied_to_all_events(self):
+        d = ServeDetector(30.0, lock_handedness=True, forced_handedness=None)
+        serves = [self._event("right", 0.9, 1.0),
+                  self._event("right", 0.8, 5.0),
+                  self._event("left", 0.6, 9.0)]
+        out = d._lock_handedness(serves)
+        assert {s.handedness for s in out} == {"right"}
+        assert {s.toss_arm for s in out} == {"left"}
+
+    def test_explicit_override_wins(self):
+        d = ServeDetector(30.0, lock_handedness=True, forced_handedness="left")
+        out = d._lock_handedness([self._event("right", 0.9, 1.0),
+                                  self._event("left", 0.6, 5.0)])
+        assert all(s.handedness == "left" and s.toss_arm == "right" for s in out)
+
+    def test_locking_disabled_preserves_inference(self):
+        d = ServeDetector(30.0, lock_handedness=False)
+        out = d._lock_handedness([self._event("right", 0.9, 1.0),
+                                  self._event("left", 0.6, 5.0)])
+        assert [s.handedness for s in out] == ["right", "left"]
+
+    def test_uses_total_evidence_not_event_count(self):
+        """Three marginal left detections must not outvote two confident rights.
+
+        Raw counting would pick 'left' here (3 > 2); weighting by score picks
+        the hand with more accumulated evidence.
+        """
+        d = ServeDetector(30.0, lock_handedness=True, forced_handedness=None)
+        out = d._lock_handedness([
+            self._event("left", 0.55, 1.0),
+            self._event("left", 0.55, 3.0),
+            self._event("left", 0.55, 5.0),   # count 3, total 1.65
+            self._event("right", 0.99, 9.0),
+            self._event("right", 0.99, 12.0),  # count 2, total 1.98
+        ])
+        assert all(s.handedness == "right" for s in out)
+
+    def test_empty_input_is_safe(self):
+        assert ServeDetector(30.0)._lock_handedness([]) == []
+
+    def test_single_event_is_kept(self):
+        d = ServeDetector(30.0, lock_handedness=True, forced_handedness=None)
+        out = d._lock_handedness([self._event("left", 0.7, 1.0)])
+        assert len(out) == 1 and out[0].handedness == "left"

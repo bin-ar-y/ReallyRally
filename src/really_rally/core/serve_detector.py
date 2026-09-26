@@ -30,6 +30,8 @@ from really_rally.core.config import (
     SERVE_CONTACT_MIN_SCORE,
     SERVE_CONTACT_WRIST_VEL,
     SERVE_FOLLOW_THROUGH_SEC,
+    SERVE_FORCED_HANDEDNESS,
+    SERVE_LOCK_HANDEDNESS,
     SERVE_MIN_SCORE,
     SERVE_TOSS_ABOVE_SHOULDER_MARGIN,
     SERVE_TOSS_MIN_SCORE,
@@ -86,9 +88,13 @@ def _smooth(arr: np.ndarray, window: int) -> np.ndarray:
 class ServeDetector:
     """Detect serve events from a downsampled pose-feature time series."""
 
-    def __init__(self, effective_fps: float):
+    def __init__(self, effective_fps: float,
+                 lock_handedness: bool = SERVE_LOCK_HANDEDNESS,
+                 forced_handedness: str = SERVE_FORCED_HANDEDNESS):
         # effective_fps accounts for PROCESS_EVERY_N_FRAMES downsampling.
         self.effective_fps = max(effective_fps, 1e-3)
+        self.lock_handedness = lock_handedness
+        self.forced_handedness = forced_handedness
         self.toss_min_frames = max(1, int(SERVE_TOSS_MIN_SEC * self.effective_fps))
         self.contact_max_frames = max(
             self.toss_min_frames,
@@ -191,7 +197,42 @@ class ServeDetector:
             )
 
         # Deduplicate overlapping serves, keeping the higher-scoring one.
-        return self._dedupe(serves)
+        serves = self._dedupe(serves)
+        return self._lock_handedness(serves)
+
+    # ------------------------------------------------------------ handedness
+    def _lock_handedness(self, serves: List[ServeEvent]) -> List[ServeEvent]:
+        """Apply one hitting hand to every serve in the video.
+
+        A player does not switch toss/serving hands mid-session, so a mix of
+        left- and right-handed events is a detection artefact, not behaviour.
+        The dominant hand is picked once (score-weighted majority, or an
+        explicit override) and every event is relabelled to it.
+        """
+        if not self.lock_handedness or not serves:
+            return serves
+
+        if self.forced_handedness in ("left", "right"):
+            hit_arm = self.forced_handedness
+        else:
+            tally: Dict[str, float] = {}
+            for s in serves:
+                tally[s.handedness] = tally.get(s.handedness, 0.0) + s.score
+            hit_arm = max(tally, key=tally.get)
+
+        toss_arm = _OTHER_ARM[hit_arm]
+        flipped = 0
+        for s in serves:
+            if s.handedness != hit_arm:
+                flipped += 1
+            s.handedness = hit_arm
+            s.toss_arm = toss_arm
+
+        if flipped:
+            print(f"[Serve] Handedness locked to '{hit_arm}'; "
+                  f"relabelled {flipped}/{len(serves)} event(s) that inferred "
+                  f"the opposite hand.")
+        return serves
 
     # ------------------------------------------------------------------ toss
     def _detect_toss_runs(self, raised, timestamps):
