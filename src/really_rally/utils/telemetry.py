@@ -17,7 +17,10 @@ def generate_telemetry_plot(metrics_data: list, fps: float, output_path: str):
     # Title_Case); without this the CSV path silently plotted nothing.
     metrics_data = [normalize_row(row) for row in metrics_data]
     try:
-        import matplotlib.pyplot as plt
+        # File-only rendering: pyplot can initialise a native windowing backend
+        # from the extraction worker, which is unsafe on macOS (and Tk).
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
     except ImportError:
         print("Note: matplotlib not installed. Skipping telemetry plot generation.")
         return
@@ -43,7 +46,9 @@ def generate_telemetry_plot(metrics_data: list, fps: float, output_path: str):
         return
         
     try:
-        fig, axs = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+        fig = Figure(figsize=(15, 10))
+        FigureCanvasAgg(fig)
+        axs = fig.subplots(3, 1, sharex=True)
         
         axs[0].plot(times, arm_energies, label='Smoothed Arm Energy', color='#1f77b4', linewidth=2)
         axs[0].plot(times, t_arms, label='Dynamic Threshold (T_Arm)', color='#d62728', linestyle='--')
@@ -67,9 +72,8 @@ def generate_telemetry_plot(metrics_data: list, fps: float, output_path: str):
         axs[2].set_title('Player Scale over Time (Walk to Camera Detection)', fontweight='bold')
         axs[2].grid(True, alpha=0.3)
         
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close(fig) # Important to prevent memory leaks in batch processing
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
         
         print(f"[Debug] Exported telemetry plot to {output_path}")
     except Exception as e:
@@ -102,7 +106,8 @@ def generate_evaluation_plot(
     """
     metrics_data = [normalize_row(row) for row in metrics_data]
     try:
-        import matplotlib.pyplot as plt
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
         import matplotlib.patches as mpatches
     except ImportError:
         print("Note: matplotlib not installed. Skipping evaluation plot.")
@@ -140,7 +145,9 @@ def generate_evaluation_plot(
             ax.axvspan(s, e, alpha=0.12, color='blue', zorder=0)
     
     try:
-        fig, axs = plt.subplots(4, 1, figsize=(18, 14), sharex=True)
+        fig = Figure(figsize=(18, 14))
+        FigureCanvasAgg(fig)
+        axs = fig.subplots(4, 1, sharex=True)
         
         # Panel 1: Arm Energy (raw smoothed)
         axs[0].plot(times, arm_energies, label='Smoothed Arm Energy', color='#1f77b4', linewidth=1.5)
@@ -184,9 +191,8 @@ def generate_evaluation_plot(
             handles.extend([gt_patch, pred_patch])
             ax.legend(handles=handles, loc='upper right', fontsize=8)
         
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=150)
-        plt.close(fig)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=150)
         
         print(f"[Eval] Exported evaluation plot to {output_path}")
     except Exception as e:

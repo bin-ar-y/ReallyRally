@@ -1,6 +1,8 @@
 import os
 import csv
 import subprocess
+import tempfile
+import time
 import cv2
 import numpy as np
 from typing import List, Tuple, Dict, Optional
@@ -14,6 +16,7 @@ from really_rally.core.vision import MotionDetector, get_pose_extractor
 from really_rally.core.features import MovementTracker, FeatureEngine
 from really_rally.utils.media_io import generate_rally_name
 from really_rally.utils.feature_store import write_feature_store
+from really_rally.utils.subprocesses import ProcessingCancelled, run_media_command
 import ssl
 
 if os.environ.get("REALLY_RALLY_ALLOW_INSECURE_SSL"):
@@ -56,7 +59,11 @@ class TennisRallyProcessor:
         print(f"Video info: {self.width}x{self.height} @ {self.fps}fps, {self.total_frames} frames")
         
         # Initialize Detectors
-        self.pose_extractor = get_pose_extractor()
+        try:
+            self.pose_extractor = get_pose_extractor()
+        except Exception:
+            self.cap.release()
+            raise
         # Object verification backend. Null by default, so the pose-only
         # pipeline is unchanged until a real detector is configured.
         self.object_detector = self._build_object_detector()
@@ -121,6 +128,9 @@ class TennisRallyProcessor:
         frame_indices = []
         
         frame_idx = 0
+        last_progress = time.monotonic()
+        if self.progress_callback:
+            self.progress_callback(0, "Scanning motion…")
         try:
             while True:
                 if not self.cap.grab():
@@ -144,9 +154,9 @@ class TennisRallyProcessor:
                 frame_idx += 1
                 
                 # Progress update (0% - 30% for Pass 1)
-                if frame_idx % 500 == 0:
-                     if self.progress_callback:
-                         self.progress_callback(0.3 * (frame_idx / self.total_frames), "Scanning Motion...")
+                if self.progress_callback and time.monotonic() - last_progress >= 0.25:
+                    self.progress_callback(0.3 * (frame_idx / max(1, self.total_frames)), "Scanning motion…")
+                    last_progress = time.monotonic()
         except KeyboardInterrupt:
             print("Scan interrupted.")
             
@@ -250,6 +260,8 @@ class TennisRallyProcessor:
 
             frame_idx = start
             while frame_idx <= end:
+                if self.stop_event and self.stop_event.is_set():
+                    return kept
                 ret, frame = self.cap.read()
                 if not ret:
                     break
@@ -449,8 +461,9 @@ class TennisRallyProcessor:
             if self.progress_callback:
                  self.progress_callback(base_progress + seg_progress, f"Analyzing Segment {i+1}/{len(motion_segments)}")
 
+            self._analysis_progress = (i, len(motion_segments))
             segment_data = self.process_pixel_segment(seg_start, seg_end)
-            if not segment_data and self.stop_event and self.stop_event.is_set():
+            if self.stop_event and self.stop_event.is_set():
                  return []
             
             # Analyze this specific segment
@@ -461,11 +474,17 @@ class TennisRallyProcessor:
         # Runs only when a real detector is configured; the default null
         # backend makes this a no-op so pose-only behaviour is unchanged.
         if self.object_detector.provides_evidence and all_rally_segments:
+            if self.progress_callback:
+                self.progress_callback(0.90, "Verifying candidate clips…")
             all_rally_segments = self.verify_candidate_windows(all_rally_segments)
 
+        if self.stop_event and self.stop_event.is_set():
+            return []
 
         # Export Debug Data
         if self.all_frame_metrics:
+            if self.progress_callback:
+                self.progress_callback(0.91, "Saving analysis files…")
             os.makedirs(self.video_dir, exist_ok=True)
             debug_csv = os.path.join(self.video_dir, "debug_metrics.csv")
             try:
@@ -506,7 +525,9 @@ class TennisRallyProcessor:
                     print(f"Failed to export feature store: {e}")
 
                 # Plot Telemetry
-                if self.generate_plot:
+                if self.generate_plot and not (self.stop_event and self.stop_event.is_set()):
+                    if self.progress_callback:
+                        self.progress_callback(0.92, "Rendering analysis chart…")
                     try:
                         from really_rally.utils.telemetry import generate_telemetry_plot
                         png_path = os.path.join(self.video_dir, "telemetry.png")
@@ -543,6 +564,7 @@ class TennisRallyProcessor:
         
         valid_pose_count = 0
         total_processed = 0
+        last_progress = time.monotonic()
         
         # Loop until end_frame
         while frame_idx <= end_frame:
@@ -605,6 +627,12 @@ class TennisRallyProcessor:
                 # Let's leave the drawing method in the class (it's there) so it can be used later.
             
             frame_idx += 1
+            if self.progress_callback and time.monotonic() - last_progress >= 0.25:
+                segment_index, segment_count = getattr(self, "_analysis_progress", (0, 1))
+                fraction = (frame_idx - start_frame) / max(1, end_frame - start_frame + 1)
+                overall = 0.3 + 0.6 * (segment_index + fraction) / segment_count
+                self.progress_callback(overall, f"Analyzing segment {segment_index + 1}/{segment_count} · {fraction:.0%}")
+                last_progress = time.monotonic()
             
         if total_processed > 0:
              # print(f"  [Debug] Segment Pose Success: {valid_pose_count}/{total_processed} frames ({valid_pose_count/total_processed:.1%})")
@@ -642,7 +670,7 @@ class TennisRallyProcessor:
         self.exported_clip_rows = []
 
         for i, seg in enumerate(segments):
-            # Cancellation boundary: stop between clips, never mid-encode.
+            # Completed clips survive cancellation; unfinished encodes are removed.
             if self.stop_event and self.stop_event.is_set():
                 print("Export stopped by user.")
                 break
@@ -653,10 +681,8 @@ class TennisRallyProcessor:
             clip_name = f"{video_stem}{self.clip_prefix}{i+1:03d}_{unique_suffix}.mp4"
             clip_path = os.path.join(runs_dir, clip_name)
 
-            self.exported_clip_rows.append(
-                [video_stem, clip_name, f"{seg.start_time:.2f}",
-                 f"{seg.end_time:.2f}", f"{seg.duration:.2f}"]
-            )
+            if self.progress_callback:
+                self.progress_callback(0.93 + 0.06 * i / len(segments), f"Exporting clip {i+1}/{len(segments)}…")
 
             # ffmpeg command. -ss MUST come before -i: as an input option it
             # seeks first and decodes only the clip, whereas after -i it is an
@@ -693,13 +719,17 @@ class TennisRallyProcessor:
             ])
 
             try:
-                res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                     timeout=EXPORT_TIMEOUT_SEC)
+                res = run_media_command(cmd, stop_event=self.stop_event, timeout=EXPORT_TIMEOUT_SEC)
                 if res.returncode != 0:
                     print(f"Warning: ffmpeg failed for {clip_name}. Stderr: {res.stderr.decode()}")
                 else:
                     print(f"Exported {clip_name} ({seg.duration:.1f}s)")
                     clip_paths.append(clip_path)
+                    self.exported_clip_rows.append(
+                        [video_stem, clip_name, f"{seg.start_time:.2f}",
+                         f"{seg.end_time:.2f}", f"{seg.duration:.2f}"])
+            except ProcessingCancelled:
+                break
             except subprocess.TimeoutExpired:
                 # Say where the time actually goes, rather than leaving the user
                 # to guess why one clip stalled.
@@ -707,6 +737,9 @@ class TennisRallyProcessor:
                       f"{clip_name} (clip at {seg.start_time:.1f}s, {seg.duration:.1f}s long). "
                       f"This is usually a slow source drive or an unusually dense "
                       f"source; the clip was skipped, the rest continued.")
+            finally:
+                if clip_path not in clip_paths and os.path.exists(clip_path):
+                    os.remove(clip_path)
 
         # Per-video manifest (fresh every run), beside the clips it describes.
         csv_path = os.path.join(self.video_dir, self.output_csv_name)
@@ -743,6 +776,10 @@ class TennisRallyProcessor:
 
         list_path = os.path.join(target_dir, "concat_list.txt")
         output_path = os.path.join(target_dir, output_name)
+        # Publish only a complete merge. Cancelling a rerun must not truncate
+        # the user's previous summary video.
+        fd, pending_path = tempfile.mkstemp(prefix=".rally-merge-", suffix=".mp4", dir=target_dir)
+        os.close(fd)
         
         # Create concat list
         with open(list_path, 'w') as f:
@@ -761,22 +798,23 @@ class TennisRallyProcessor:
             "-safe", "0",
             "-i", list_path,
             "-c", "copy",
-            output_path
+            pending_path
         ]
         
         try:
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600)
+            res = run_media_command(cmd, stop_event=self.stop_event, timeout=600)
+            if res.returncode != 0:
+                print(f"Error merging clips: {res.stderr.decode()}")
+                return None
+            os.replace(pending_path, output_path)
+            return output_path
         except subprocess.TimeoutExpired:
             print("Error: merging clips timed out.")
-            os.remove(list_path)
             return None
-        if res.returncode != 0:
-             print(f"Error merging clips: {res.stderr.decode()}")
-             return None
-        
-        # Cleanup list
-        os.remove(list_path)
-        return output_path
+        finally:
+            for path in (list_path, pending_path):
+                if os.path.exists(path):
+                    os.remove(path)
 
     def transfer_metadata(self, source_path: str, target_path: str):
         """
@@ -798,16 +836,13 @@ class TennisRallyProcessor:
         ]
         
         try:
-            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+            res = run_media_command(cmd, stop_event=self.stop_event, timeout=60)
             if res.returncode != 0:
                 print(f"Error transferring metadata: {res.stderr.decode()}")
-                if os.path.exists(temp_output):
-                    os.remove(temp_output)
                 return
+            os.replace(temp_output, target_path)
         except subprocess.TimeoutExpired:
             print("Error: Metadata transfer timed out.")
+        finally:
             if os.path.exists(temp_output):
                 os.remove(temp_output)
-            return
-
-        os.replace(temp_output, target_path)

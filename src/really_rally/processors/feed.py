@@ -52,6 +52,8 @@ class FeedPracticeProcessor(TennisRallyProcessor):
         heights = []
         
         for i in range(num_samples):
+            if self.stop_event and self.stop_event.is_set():
+                return
             frame_idx = i * step
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = self.cap.read()
@@ -102,6 +104,8 @@ class FeedPracticeProcessor(TennisRallyProcessor):
         before proceeding to the motion scan.
         """
         self.estimate_player_scale()
+        if self.stop_event and self.stop_event.is_set():
+            return []
         # Call the parent's scan_motion_segments, which will then do the frame skipping logic
         return super().scan_motion_segments()
         

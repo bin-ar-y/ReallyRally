@@ -45,16 +45,19 @@ python3 gui.py
 ```
 
 ### GUI Features
-1.  **Modern Dark UI**: A sleek, dark-themed interface built with `CustomTkinter`. 
-2.  **Select Videos**: Choose one or multiple video files to process in batch.
+1.  **Focused Workspace**: A charcoal-and-green interface with a video queue, session settings, and a persistent progress area.
+2.  **Select Videos**: Choose or drop one or multiple video files to process in batch. Files are checked in the background, with an “Adding videos” indicator.
 3.  **Output Location**: Select where the results should be saved.
 4.  **Start Processing**: Runs the analysis.
-    - **Progress Bar**: Shows real-time scanning and analysis progress for each video.
-    - **Stop Button**: Safely cancels the operation at any time.
+    - **Progress Bar**: Shows scanning, analysis, and export progress, with elapsed time and an activity indicator during preparation, plotting, and merging.
+    - **Session Settings**: Locked during processing so the whole batch uses the options you started with.
+    - **Stop Button**: Acknowledges cancellation immediately, stops the encoder, and keeps completed clips.
 5.  **Robust Batch Processing**:
     - Automatically standardizes different video resolutions (e.g., mixing 4K and 1080p).
     - Ensures unique filenames for every clip to prevent overwrites.
     - merges all detected rallies into a single output file: `{Date}_Merged_Rallies.mp4`.
+6.  **Finish at Your Pace**: Completion appears inside the app. Use **Open results** to open the output folder, process another session, or choose **Quit**. Nothing opens automatically.
+7.  **Normal Quit**: The Quit button, window close button, and Cmd+Q on macOS (Ctrl+Q elsewhere) share the same exit flow. If work is running, choose whether to keep working or stop and quit; the app waits for cleanup before closing.
 
 ## Usage (Command Line)
 
