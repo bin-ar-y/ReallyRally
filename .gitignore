@@ -1,25 +1,44 @@
-# Python
+# Python and packaging
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
 
-# Virtual environment
+# Local environments and editor settings
 .venv/
+venv/
+.idea/
+.vscode/
 
-# macOS
-.DS_Store
+# Test, coverage and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
-# Environment variables and secrets
+# Local settings and secrets
 .env
 .env.*
+!.env.example
 
-# Temporary files
+# OS and temporary files
+.DS_Store
+.Rhistory
 *.log
+*.pid
 
-# Results / generated files
+# Source videos and generated results remain local
+*.[mM][pP]4
+*.[mM][oO][vV]
+*.[aA][vV][iI]
+*.[mM][kK][vV]
+*.[mM]4[vV]
 results/
 rallies/
-*.mp4
+out/
 data/
-
-# R history
-.Rhistory
+serveclips/
