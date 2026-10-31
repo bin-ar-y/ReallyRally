@@ -8,10 +8,18 @@ __pycache__/
 # macOS
 .DS_Store
 
+# Environment variables and secrets
+.env
+.env.*
+
+# Temporary files
+*.log
+
 # Results / generated files
 results/
 rallies/
 *.mp4
+data/
 
 # R history
 .Rhistory
