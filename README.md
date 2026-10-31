@@ -4,7 +4,7 @@ A local, offline tool to automatically extract tennis rallies from practice vide
 
 ## Prerequisites
 
-- **Python 3.8+**
+- **Python 3.9–3.11** (3.11 recommended; the pinned MediaPipe release has no Python 3.12 wheel)
 - **FFmpeg** (Must be installed and accessible in your terminal)
 
 ### 1. Install FFmpeg
