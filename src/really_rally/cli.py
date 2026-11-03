@@ -49,7 +49,30 @@ def main():
     parser_studio.add_argument("--video", help="Video to open on launch")
     parser_studio.add_argument("--features", help="Feature store (defaults to features.csv beside the video)")
 
+    motion = subparsers.add_parser("reconstruct", help="Build an animated 3D player from a stroke window")
+    motion.add_argument("video_path")
+    motion.add_argument("--impact-frame", type=int, required=True, help="Zero-based frame in this video")
+    motion.add_argument("--stroke", default="stroke", help="Stroke name for the replay")
+    motion.add_argument("--before", type=float, default=1.0, help="Seconds before impact")
+    motion.add_argument("--after", type=float, default=1.0, help="Seconds after impact")
+    motion.add_argument("--player-box", type=float, nargs=4, default=(0, 0, 1, 1),
+                        metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"), help="Fixed normalized player region")
+    motion.add_argument("--footwork", choices=("supported", "unconstrained"), default="supported",
+                        help="Use supported when at least one foot stays on the court; use unconstrained for jumps or unknown contact")
+    motion.add_argument("--export-html", action="store_true", help="Also export a standalone copy for sharing")
+    motion.add_argument("--output", default="out/motion", help="Parent directory for reconstruction bundles")
+
     args = parser.parse_args()
+
+    if args.mode == "reconstruct":
+        from really_rally.core.reconstruction import reconstruct
+        try:
+            result = reconstruct(args.video_path, args.output, args.impact_frame, args.stroke,
+                                 args.before, args.after, args.player_box, args.footwork, portable_html=args.export_html)
+        except (ValueError, RuntimeError, OSError) as exc:
+            parser.exit(1, f"Reconstruction failed: {exc}\n")
+        print(f"Animated model: {result / 'player.glb'}\nOpen folder in Movement analysis: {result}")
+        return
 
     if args.mode == "studio":
         from really_rally.studio.app import StudioApp, main as studio_main

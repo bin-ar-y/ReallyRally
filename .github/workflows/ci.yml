@@ -32,6 +32,10 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ -v --cov=really_rally --cov-report=term-missing --cov-report=xml
 
+      - name: Test offline stroke review calculations
+        if: matrix.python-version == '3.11'
+        run: node --test tests/test_review_math.cjs
+
       - name: Upload coverage to Codecov (optional)
         uses: codecov/codecov-action@v4
         with:

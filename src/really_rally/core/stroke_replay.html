@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stroke replay · ReallyRally</title>
+<style>
+*{box-sizing:border-box}body{background:#f1efdf;color:#202d28;margin:0;font:16px Georgia,serif}
+main{width:min(1100px,94vw);margin:auto;padding:3vh 0}header,footer,.controls,.caption{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+header{border-top:5px solid #243c33;border-bottom:1px solid #768579;padding:12px 0;justify-content:space-between}
+.brand,.caption,output,.label,button,select,a{font:12px/1.4 Menlo,Consolas,monospace}.brand,.label{text-transform:uppercase;letter-spacing:.1em}
+h1{font:normal clamp(2rem,4vw,3.3rem)/1 Georgia,serif;margin:.35em 0}.panels{display:grid;grid-template-columns:1fr 1.3fr;gap:2px;background:#253d34}
+figure{margin:0;min-width:0;position:relative;background:#172c28}.view{height:clamp(230px,40vh,440px);display:block;width:100%;object-fit:contain}
+.recording{position:relative}.recording svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}label{font:12px Menlo,monospace}label input{width:auto}
+#scene{background:radial-gradient(ellipse at 25% 5%,#345879 0%,transparent 65%),linear-gradient(170deg,#203d5b,#142e49 65%,#264969)}
+canvas{touch-action:none;cursor:grab}.caption{justify-content:space-between;color:#e0eadb;padding:9px 14px;background:#233a32}
+button,select,a{background:#efeedd;color:#1c362d;border:1px solid #718173;padding:7px 11px;border-radius:2px;cursor:pointer}
+button:hover,a:hover{background:#dce5cf}#play{background:#214e41;color:white}input{accent-color:#246957;width:100%}
+.controls{margin:12px 0}footer{justify-content:space-between;margin-top:15px;border-top:1px solid #98a296;padding-top:12px}
+@media(max-width:650px){.panels{grid-template-columns:1fr}.view{height:30vh}.caption{font-size:10px}}
+.measures{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid #87958c;border-bottom:1px solid #87958c}
+.measures div{padding:10px 12px;border-right:1px solid #acb4a5}.measures div:last-child{border:0}
+.measures small,.measures output{display:block}.measures small{font:12px Menlo,monospace}.measures output{font:clamp(14px,2.3vw,25px) Georgia,serif}
+#trend{width:100%;height:55px;display:block;background:#e4e6d8;cursor:crosshair}
+details{font-size:14px;line-height:1.5}details p{max-width:80ch}.context{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}
+#reviewPanel{border-top:2px solid #496759;margin-top:10px;padding:10px 0}#reviewPanel h2{margin:0;font-size:20px}.findings p{margin:.4em 0}.findings button,#markList button{font-size:11px;padding:2px 6px;margin-left:4px}
+#reviewPanel fieldset{border:1px solid #aab5a5;padding:8px;margin:8px 0}#reviewPanel fieldset label{display:inline-block;margin:4px 5px}
+#reviewPanel input[type=text]{width:13ch}#reviewFiles{max-width:230px}.recording.marking{outline:3px solid #ffbe76;cursor:crosshair}
+#pointHint{position:absolute;top:5px;left:6px;background:#f1efdf;color:#17382d;padding:4px 8px;font:12px Menlo,monospace;pointer-events:none}
+#reviewStatus{min-height:1.2em;display:block}.context [hidden]{display:none}#reviewPanel [hidden]{display:none}
+</style>
+<main><header><span class="brand">ReallyRally / Motion study</span><a href="player.glb" download>Animated model ↓</a></header>
+<h1 id="title">Stroke replay</h1><p id="anchorNote" hidden></p>
+<div class="panels"><figure><div class="recording"><img id="source" class="view" alt="Selected source frame"><svg id="overlay" aria-hidden="true"></svg><span id="pointHint" hidden></span></div><figcaption class="caption"><label><input type="checkbox" id="overlayToggle" checked> Overlay</label><select id="sourceMode" aria-label="Source overlay"><option value="overlay">Image detections</option><option value="fit_overlay">Forward fit</option><option value="track_overlay">Reconstructed path</option></select><span id="frame"></span></figcaption></figure>
+<figure><canvas id="scene" class="view" aria-label="3D body reconstruction. Drag to rotate, or use the view buttons."></canvas><figcaption class="caption"><label>3D view <select id="bodyMode" aria-label="3D display"><option value="body">Human model</option><option value="joints">Joint trajectories</option></select></label><span>Drag to orbit</span></figcaption></figure></div>
+<div class="controls"><button id="play">Play</button><button id="prev" aria-label="Previous frame">−1 frame</button><button id="next" aria-label="Next frame">+1 frame</button><button id="impact">Impact</button>
+<select id="speed" aria-label="Playback speed"><option value=".25">¼ speed</option><option value=".5">½ speed</option><option value="1" selected>Full speed</option></select><button id="front">Camera view</button><button id="side">Side view</button><button id="top">Top view</button></div>
+<input type="range" id="scrub" min="0" step="1" aria-label="Stroke frame">
+<footer><output id="readout"></output><span class="label">Selected side on video · amber</span></footer>
+<section id="reviewPanel" hidden><h2 id="reviewTitle"></h2><div id="findings" class="findings"></div>
+<details id="reviewEditor"><summary>Mark evidence and compare strokes</summary>
+<p>Pause on an event and choose its mark. For a ball, racket tip or setup foot, click its position on the recording. Contact uses the impact frame selected at reconstruction.</p>
+<div class="controls"><select id="eventType" aria-label="Evidence type"></select><button id="markEvent">Mark event</button><button id="clearEvent">Clear selected mark</button></div>
+<div id="markList"></div><fieldset id="shotContext"><legend>Recording context</legend></fieldset>
+<div class="controls"><button id="saveReview">Download review</button><label>Load reviews <input type="file" id="reviewFiles" accept="application/json,.json" multiple></label></div>
+<output id="reviewStatus" aria-live="polite"></output></details></section>
+<div class="context"><label>Arm <select id="arm"><option value="right">Right</option><option value="left">Left</option></select></label>
+<label>Plot <select id="metric"><option value="trunk_separation_deg">Trunk separation (°)</option><option value="elbow_elevation_deg">Elbow elevation (°)</option><option value="elbow_azimuth_deg">Elbow azimuth (°)</option><option value="elbow_flexion_deg">Elbow flexion (°)</option><option value="knee_flexion_deg">Knee flexion (°), selected side</option><option value="wrist_speed_m_s">Hip-relative wrist speed (m/s)</option></select></label>
+<label><input type="checkbox" id="trail" checked> Wrist trail · last 250 ms</label><label><input type="checkbox" id="armTrace" checked> Trace selected arm through body</label> <a href="kinematics.csv" download>Measured data ↓</a> <a href="trajectory.csv" download>Trajectory data ↓</a></div>
+<div class="measures"><div><small>Elbow · elevation / azimuth</small><output id="elbow"></output></div>
+<div><small>Shoulders relative to hips</small><output id="trunk"></output></div>
+<div><small>Wrist speed · hip-relative</small><output id="wrist"></output></div></div>
+<output id="armEvidence"></output><br><output id="plotValue"></output><svg id="trend" viewBox="0 0 800 55" preserveAspectRatio="none" aria-label="Selected measurement over the stroke"></svg>
+<details><summary>How to read the measurements</summary>
+<p>Elbow direction follows the upper arm from shoulder to elbow. Elevation is above the plane perpendicular to the trunk, and azimuth runs from the arm’s outward side toward the player’s front. A nearly vertical arm has no reliable azimuth. Flexion is zero at full extension.</p>
+<p>Trunk separation is the signed shoulder-line angle relative to the hip line about the hip-to-shoulder axis. Wrist speed uses estimated meters relative to the hips. The 3D trail follows the wrist in the displayed space. The video trail uses pixels in the source image. Finger detections are shown only on the recording.</p>
+<p>In supported footwork, the lowest observed shoe sets the court height. A gap in foot evidence leaves the floor unresolved. For jumps or unknown contact, choose unconstrained footwork at reconstruction. Playback interpolates between adjacent poses. Pausing or stepping returns to a recorded frame. The human model uses a neutral body shape. Switch to Tracked joints to inspect the landmarks. Dashed segments and curves show reconstructed motion through occlusion. The arm readout identifies each joint’s source. With too little evidence, the path stays open. Stroke review findings use the measured data. The vertical marker identifies the replay reference frame. Click the chart to inspect a moment.</p></details></main>
+<script type="application/json" id="initialReview">null</script>
+<script type="application/json" id="motion">__REPLAY_DATA__</script>
+<script>
+"use strict";
+const data = JSON.parse(document.querySelector("#motion").textContent);
+const el = id => document.getElementById(id);
+const canvas = el("scene"), ctx = canvas.getContext("2d");
+__MANNEQUIN_SCRIPT__
+const mannequin = new Mannequin(data.mannequin);
+const impact = data.frames.indexOf(data.impact);
+if(["left","right"].includes(data.hitting_hand)) el("arm").value=data.hitting_hand;
+const referenceLabel = {serve_contact:"Estimated contact", motion_peak:"Motion peak", clip_midpoint:"Clip midpoint"}[data.anchor_kind] || "Impact";
+if(referenceLabel!=="Impact"){
+    el("impact").textContent=referenceLabel;
+    el("anchorNote").hidden=false;
+    el("anchorNote").textContent={
+        serve_contact:"The serve detector estimated contact at frame "+data.impact+".",
+        motion_peak:"Frame "+data.impact+" is a peak in arm movement within a detected stroke. Ball contact was not verified.",
+        clip_midpoint:"No stroke was detected. This short recording is shown in full, with its midpoint as the reference."
+    }[data.anchor_kind];
+}
+const trackLabels = ["unavailable","forward fit","reverse fit","temporal estimate","image-guided estimate","boundary prediction"];
+function inferred(i, ids){return ids.some(j => data.joint_status[i][j]>1);}
+function armIds(side){return side==="right"?[12,14,16]:[11,13,15];}
+function metricIds(metric, side){
+    const arm=armIds(side);
+    if(metric.includes("knee"))return side==="right"?[24,26,28]:[23,25,27];
+    if(metric.includes("trunk"))return [11,12,23,24];
+    if(metric.includes("wrist"))return [...arm,23,24];
+    return metric.includes("flexion")?arm:[arm[0],arm[1],11,12,23,24];
+}
+function isEstimate(i, metric, side){
+    const ids=metricIds(metric,side);
+    return inferred(i,ids) || (i>0 && metric==="wrist_speed_m_s" && inferred(i-1,ids));
+}
+function metricValue(i, metric, side) {
+    const key=metric==="trunk_separation_deg"?metric:side+"_"+metric;
+    if(metricIds(metric,side).some(j=>!data.joint_status[i][j]))return null;
+    return (isEstimate(i,metric,side)?data.curves:data.kinematics)[i][key];
+}
+let frame = impact, blend = 0, yaw = 0, pitch = 0, playing = false, lastTick = null, elapsed = 0;
+el("title").textContent = data.stroke.charAt(0).toUpperCase() + data.stroke.slice(1) + " replay";
+el("scrub").max = data.frames.length - 1;
+const heights = data.root_y.filter((_, i) => data.support[i] >= 0).sort((a,b) => a-b);
+const cameraY = heights.length ? heights[Math.floor(heights.length/2)] : 0;
+const extent = Math.max(1.02, ...data.joints.map((row,i) => Math.max(0, ...row.filter(Boolean)
+    .map(([x,y,z]) => Math.hypot(x, y+data.root_y[i]-cameraY, z)))));
+const intervals = data.times.slice(1).map((t,i) => t-data.times[i]).sort((a,b) => a-b);
+const maxBlendGap = intervals.length ? Math.min(.1, 2.5*(intervals[(intervals.length-1)>>1]+intervals[intervals.length>>1])/2) : 0;
+// Orthographic orbit keeps distances comparable as the reviewer turns the model.
+function draw() {
+    const w = canvas.clientWidth, h = canvas.clientHeight, dpr = devicePixelRatio || 1;
+    if (!w || !h) return;
+    if (canvas.width !== Math.round(w*dpr) || canvas.height !== Math.round(h*dpr)) {
+        canvas.width = Math.round(w*dpr); canvas.height = Math.round(h*dpr);
+    }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+    const scale = .46*Math.min(w,h)/extent;
+    function project([x,y,z]) {
+        y -= cameraY;
+        const u = x*Math.cos(yaw)+z*Math.sin(yaw), depth = -x*Math.sin(yaw)+z*Math.cos(yaw);
+        return [w/2+scale*u, h/2-scale*(y*Math.cos(pitch)-depth*Math.sin(pitch)), depth*Math.cos(pitch)+y*Math.sin(pitch)];
+    }
+    ctx.strokeStyle="rgba(150,191,215,.14)"; ctx.lineWidth=1;
+    const support = data.support[frame];
+    if (support >= 0) for(let i=-4;i<=4;i++) {
+        for(const ends of [[[i/4,0,-1],[i/4,0,1]],[[-1,0,i/4],[1,0,i/4]]]) {
+            const [a,b]=ends.map(project);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+        }
+    }
+    const next = Math.min(frame+1, data.frames.length-1);
+    const root = (1-blend)*data.root_y[frame] + blend*data.root_y[next];
+    const points=data.joints[frame].map((p,j)=>{
+        if (!p) return null;
+        const other = data.joints[next][j];
+        const [x,y,z] = blend && other ? p.map((v,k) => (1-blend)*v + blend*other[k]) : p;
+        return project([x,y+root,z]);
+    });
+    const bones=data.limbs.filter(([,a,b])=>points[a] && points[b])
+        .sort((u,v)=>(points[u[1]][2]+points[u[2]][2])-(points[v[1]][2]+points[v[2]][2]));
+    // Trace only connected samples that passed the same checks as the CSV.
+    const arm=el("arm").value;
+    if(el("trail").checked){
+        const trace=wristTrail(arm);
+        const wristIds=metricIds("wrist",arm);
+        const begin=frame-trace.length+1;
+        ctx.strokeStyle="#f8d061";ctx.lineWidth=2;
+        function segment(a,b,dashed) {
+            if(!a || !b)return;
+            ctx.setLineDash(dashed?[3,3]:[]);ctx.beginPath();
+            ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+        }
+        for(let k=1;k<trace.length;k++){
+            segment(trace[k-1] && project(trace[k-1]),trace[k] && project(trace[k]),
+                    inferred(begin+k-1,wristIds)||inferred(begin+k,wristIds));
+        }
+        if(blend && trace.at(-1))segment(project(trace.at(-1)),points[wristIds[2]],inferred(frame,wristIds)||inferred(next,wristIds));
+        ctx.setLineDash([]);
+    }
+    const human = el("bodyMode").value === "body";
+    const time = data.times[frame] + blend*(data.times[next]-data.times[frame]);
+    const shells = human ? mannequin.draw(ctx, time-data.times[0], w, h, scale, yaw, pitch, cameraY) : 0;
+    if(human && el("armTrace").checked){
+        const ids=armIds(arm);
+        for(let k=1;k<ids.length;k++){
+            const a=points[ids[k-1]], b=points[ids[k]];
+            if(!a || !b)continue;
+            ctx.strokeStyle="#d08636";ctx.lineWidth=2;
+            ctx.setLineDash(inferred(frame,[ids[k-1],ids[k]])?[3,3]:[]);
+            ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+            ctx.fillStyle="#eda94d";ctx.beginPath();ctx.arc(b[0],b[1],2.6,0,2*Math.PI);ctx.fill();
+        }
+        ctx.setLineDash([]);
+    }
+    for(const [name,i,j] of human ? [] : bones) {
+        const a=points[i],b=points[j], active=name.toLowerCase().startsWith(arm);
+        ctx.strokeStyle=active?"#ffab6d":name.startsWith("Left") || name.startsWith("Right")?"#78aaa0":"#d2dbc6";
+        ctx.setLineDash(inferred(frame,[i,j])?[3,3]:[]);
+        ctx.lineWidth=active?3:1.7;ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+        for(const p of [a,b]){ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.arc(p[0],p[1],active?3:2,0,2*Math.PI);ctx.fill();}
+    }
+    ctx.setLineDash([]);
+    const offset=time-data.times[impact];
+    const visibility = human ? shells+" of "+mannequin.parts.length+" body parts visible" :
+        bones.length+" of "+data.limbs.length+" segments visible";
+    const footing = data.footwork === "supported" ? (support < 0 ? "floor unresolved" : "floor · "+["left","right"][support]+" sole") : "hip-relative";
+    el("readout").textContent=(frame===impact && !blend?referenceLabel+" · ":"") + offset.toFixed(3)+" s  /  "+visibility+"  /  "+footing;
+}
+function wristTrail(side,image=false){
+    let begin=frame;
+    while(begin>0 && data.times[frame]-data.times[begin-1]<=.25)begin--;
+    return data.kinematics.slice(begin,frame+1).map((row,k)=>{
+        if(image && el("sourceMode").value==="track_overlay")return data.track_overlay[begin+k][armIds(side)[2]];
+        if (!image && inferred(begin+k,metricIds("wrist",side))) row=data.curves[begin+k];
+        if (!image && metricIds("wrist",side).some(j=>!data.joint_status[begin+k][j])) return null;
+        if(row[side+"_wrist_x_m"]===null)return null;
+        return image?[row[side+"_wrist_u_px"]/data.image_size[0],row[side+"_wrist_v_px"]/data.image_size[1]]:
+                     ["x","y","z"].map(axis=>row[side+"_wrist_"+axis+"_m"] + (axis==="y"?data.root_y[begin+k]:0));
+    });
+}
+let chartKey="", chartRange="";
+function readings(){
+    const arm=el("arm").value,row=data.kinematics[frame],metric=el("metric").value;
+    const key=metric==="trunk_separation_deg"?metric:arm+"_"+metric;
+    const fmt=(v,unit,digits=0)=>v===null?"—":v.toFixed(digits)+unit;
+    const reading=(metric,unit,digits=0)=>{
+        const value=metricValue(frame,metric,arm);
+        return (value!==null && isEstimate(frame,metric,arm)?"≈ ":"")+fmt(value,unit,digits);
+    };
+    el("elbow").textContent=reading("elbow_elevation_deg","°")+" / "+reading("elbow_azimuth_deg","°");
+    el("trunk").textContent=reading("trunk_separation_deg","°");
+    el("wrist").textContent=reading("wrist_speed_m_s"," m/s",1);
+    el("armEvidence").textContent=arm+" arm · "+armIds(arm).map((j,k)=>["shoulder","elbow","wrist"][k]+" "+trackLabels[data.joint_status[frame][j]]).join(" / ");
+    const name=el("metric").selectedOptions[0].textContent, unit=metric.endsWith("_deg")?"°":" m/s";
+    const x=i=>800*(data.times[i]-data.times[0])/(data.times.at(-1)-data.times[0] || 1);
+    const updateValue=()=>{el("plotValue").textContent=name+" · "+reading(metric,unit,1)+" · dashed = reconstructed"+chartRange;};
+    el("wrist").title="Forward fit: "+row[arm+"_wrist_quality"].replaceAll("_"," ");
+    if(chartKey===arm+key){
+        el("chartCursor").setAttribute("d","M"+x(frame)+" 0V55");updateValue();return;
+    }
+    chartKey=arm+key;
+    const vals=data.frames.map((_,i)=>metricValue(i,metric,arm)), available=vals.filter(v=>v!==null);
+    const low=Math.min(...available),high=Math.max(...available);
+    chartRange=available.length?"  |  range "+fmt(low,unit,1)+" to "+fmt(high,unit,1):"  |  no usable samples";
+    updateValue();
+    const y=v=>48-40*(v-low)/(high-low || 1);
+    const paths=["",""];
+    for(let i=1;i<vals.length;i++){
+        if(vals[i]===null || vals[i-1]===null || data.times[i]-data.times[i-1]>maxBlendGap) continue;
+        const estimated=isEstimate(i,metric,arm) || isEstimate(i-1,metric,arm);
+        paths[Number(estimated)]+="M"+x(i-1)+" "+y(vals[i-1])+"L"+x(i)+" "+y(vals[i])+" ";
+    }
+    const cursor=x(frame),hit=x(impact);
+    el("trend").innerHTML=`<path d="M${hit} 0V55" stroke="#ac6b30" stroke-dasharray="3 3"/>
+        <path d="${paths[1]}" fill="none" stroke="#a45a25" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" stroke-width="2"/>
+        <path d="${paths[0]}" fill="none" stroke="#226c60" vector-effect="non-scaling-stroke" stroke-width="2"/>
+        <path id="chartCursor" d="M${cursor} 0V55" stroke="#2a382f"/>`;
+}
+function overlay() {
+    const layer=el("overlay");
+    layer.replaceChildren();
+    if(!el("overlayToggle").checked){drawMarks(layer);return;}
+    const [w,h]=data.image_size;
+    layer.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    function line(start,end,color,width=1.6,dashed=false){
+        if(!start || !end)return;
+        const segment=document.createElementNS("http://www.w3.org/2000/svg","line");
+        for(const [key,val] of Object.entries({x1:start[0]*w,y1:start[1]*h,x2:end[0]*w,y2:end[1]*h,
+            stroke:color,"stroke-width":width,"vector-effect":"non-scaling-stroke"}))segment.setAttribute(key,val);
+        if(dashed)segment.setAttribute("stroke-dasharray","4 3");
+        layer.append(segment);
+    }
+    const arm=el("arm").value, side=arm==="right"?1:0;
+    const points=data[el("sourceMode").value][frame];
+    for(const [name,a,b] of data.limbs){
+        line(points[a],points[b],name.toLowerCase().startsWith(arm)?"#ffa865":"#68ecd4",1.6,el("sourceMode").value==="track_overlay" && inferred(frame,[a,b]));
+    }
+    const hand=data.hand_overlay[frame][side];
+    if(hand){
+        for(const digit of [[0,1,2,3,4],[0,5,6,7,8],[5,9,10,11,12],[9,13,14,15,16],[13,17,18,19,20],[0,17]]){
+            for(let i=1;i<digit.length;i++)line(hand[digit[i-1]],hand[digit[i]],"#fff194",1);
+        }
+    }
+    if(el("trail").checked){
+        const path=wristTrail(arm,true);
+        const ids=metricIds("wrist",arm), begin=frame-path.length+1;
+        for(let i=1;i<path.length;i++)line(path[i-1],path[i],"#ffdb5c",2,
+            el("sourceMode").value==="track_overlay" && (inferred(begin+i-1,ids)||inferred(begin+i,ids)));
+    }
+    drawMarks(layer);
+}
+el("overlayToggle").onchange=el("sourceMode").onchange=overlay;
+// Keep a short decoded window ready while the source runs alongside the 3D view.
+const upcoming = new Map();
+function preloadSource(i) {
+    for (const index of upcoming.keys()) if (index < i || index > i+6) upcoming.delete(index);
+    for (let k=i+1; k<=i+6 && k<data.images.length; k++) {
+        if (upcoming.has(k)) continue;
+        const img = new Image();
+        img.src = "data:image/jpeg;base64,"+data.images[k];
+        img.decode().catch(()=>{});
+        upcoming.set(k,img);
+    }
+}
+function show(i, fraction=0) {
+    blend=fraction;
+    if(pendingPoint && frame!==i){stopMarking();setMessage("Frame changed. Choose Mark event again.");}
+    frame=Math.max(0,Math.min(data.frames.length-1,i));
+    el("scrub").value=frame;el("frame").textContent="Frame "+data.frames[frame];
+    el("source").src=upcoming.get(frame)?.src ?? "data:image/jpeg;base64,"+data.images[frame];
+    if (playing) preloadSource(frame);
+    draw();overlay();readings();
+}
+function pause(){playing=false;el("play").textContent="Play";if(blend){blend=0;draw();}}
+function seek(i){pause();show(i);}
+function tick(now){
+    if(!playing)return;
+    if(lastTick!==null) elapsed+=(now-lastTick)/1000*Number(el("speed").value);
+    lastTick=now;
+    let next=frame;
+    while(next+1<data.times.length && data.times[next+1]<=elapsed)next++;
+    const gap = next+1<data.times.length ? data.times[next+1]-data.times[next] : 0;
+    const fraction = gap>0 && gap<=maxBlendGap ? Math.max(0,Math.min(1,(elapsed-data.times[next])/gap)) : 0;
+    if(next!==frame)show(next,fraction);
+    else if (fraction!==blend){blend=fraction;draw();}
+    if(frame===data.frames.length-1)pause();else raf=requestAnimationFrame(tick);
+}
+let raf;
+el("play").onclick=()=>{
+    cancelAnimationFrame(raf);
+    if(playing){pause();return;}
+    if(frame===data.frames.length-1)show(0);
+    elapsed=data.times[frame];lastTick=null;playing=true;preloadSource(frame);el("play").textContent="Pause";raf=requestAnimationFrame(tick);
+};
+el("scrub").oninput=e=>seek(Number(e.target.value));
+el("prev").onclick=()=>seek(frame-1);el("next").onclick=()=>seek(frame+1);el("impact").onclick=()=>seek(impact);
+el("front").onclick=()=>{yaw=0;pitch=0;draw();};el("side").onclick=()=>{yaw=Math.PI/2;pitch=0;draw();};
+canvas.onpointerdown=e=>{canvas.setPointerCapture(e.pointerId);};
+canvas.onpointermove=e=>{
+    if(canvas.hasPointerCapture(e.pointerId)){
+        yaw+=e.movementX*.012;pitch=Math.max(-1.4,Math.min(1.4,pitch+e.movementY*.012));draw();
+    }
+};
+el("bodyMode").onchange=draw;
+el("top").onclick=()=>{yaw=0;pitch=Math.PI/2;draw();};
+el("metric").onchange=readings;
+el("armTrace").onchange=draw;
+el("arm").onchange=el("trail").onchange=()=>{draw();overlay();readings();};
+el("trend").onclick=e=>{
+    const rect=el("trend").getBoundingClientRect();
+    const target=data.times[0]+(e.clientX-rect.left)/rect.width*(data.times.at(-1)-data.times[0]);
+    const closest=data.times.reduce((best,t,i)=>Math.abs(t-target)<Math.abs(data.times[best]-target)?i:best,0);seek(closest);
+};
+__SHOT_REVIEW_SCRIPT__
+startReview();new ResizeObserver(draw).observe(canvas);
+const linkedFrame = new URLSearchParams(location.hash.slice(1)).get("frame");
+const linkedIndex = linkedFrame===null?-1:data.frames.indexOf(Number(linkedFrame));
+show(linkedIndex<0?impact:linkedIndex);
+</script></html>

@@ -44,12 +44,20 @@ source .venv/bin/activate
 python3 gui.py
 ```
 
+Use the **Analysis** menu or the two workspace buttons at the top of the window.
+
+- **Video analysis** contains the original rally, serve and multiball clip extraction, chart and merge controls. Its animated replay option is on by default.
+- **Movement analysis** lets you choose a session type and use **Analyze videos…** to build movement clips without exporting or merging highlight videos. Use **Open session…** for a saved movement-session JSON file, or **Open folder…** for an existing stroke or results folder. Select a stroke to see the source clip in the left column and the shaded 3D player in the right. Drag the player to orbit, scrub or step through the synchronized frames, and select an arm and swing metric. Dashed amber chart segments and ≈ values identify reconstructed measurements.
+- Desktop sessions store source frames in `frames.zip` with the exported model and swing data. Older bundles can use the original recording. Desktop previews run inside the app without opening a browser. You can open a saved session directly with `python gui.py --movement path/to/movement-session.json`.
+
 ### GUI Features
 1.  **Focused Workspace**: A charcoal-and-green interface with a video queue, session settings, and a persistent progress area.
 2.  **Select Videos**: Choose or drop one or multiple video files to process in batch. Files are checked in the background, with an “Adding videos” indicator.
 3.  **Output Location**: Select where the results should be saved.
 4.  **Start Processing**: Runs the analysis.
     - **Progress Bar**: Shows scanning, analysis, and export progress, with elapsed time and an activity indicator during preparation, plotting, and merging.
+    - **Build animated 3D replays** is checked by default. Start processing to reconstruct detected strokes from the original frames, including the racket arm through short occlusions. Untick it for clips and ordinary analysis only. For strokes with a jump, also clear **Keep one foot on the court** when generating replays.
+    - **Open 3D replays** opens the native Movement analysis workspace. Serve replays use estimated contact; rallies and multiball use peaks in arm movement inside accepted segments. If no stroke is detected in a recording of ten seconds or less, the GUI shows the full clip and labels its midpoint. Longer recordings need a detected stroke or a manually chosen window in Debug Studio.
     - **Session Settings**: Locked during processing so the whole batch uses the options you started with.
     - **Stop Button**: Acknowledges cancellation immediately, stops the encoder, and keeps completed clips.
 5.  **Robust Batch Processing**:
@@ -101,6 +109,7 @@ out/
         ├── features.csv              # full per-frame feature store
         ├── debug_metrics.csv         # 18-column telemetry summary
         ├── telemetry.png             # with --plot / the GUI checkbox (on by default)
+        ├── motion/                   # desktop strokes: frames.zip, player.glb and swing data
         ├── serve_events.csv          # serve mode only: handedness, toss/contact times
         ├── labels.csv                # your ground truth        (written by the studio)
         ├── predictions.csv           # detector output          (written by the studio)
@@ -146,6 +155,112 @@ See **[docs/STUDIO.md](docs/STUDIO.md)** for the keyboard map and workflow.
 
 `<video>_telemetry.png` remains the static summary for reports, and
 `<video>_debug_metrics.csv` carries the same data numerically.
+
+## Reconstruct a stroke in 3D
+
+In Debug Studio, open a video, scrub to impact, and choose **Reconstruct stroke…**.
+Draw a box that includes the player's entire movement (or keep the full frame
+for a single player), select the stroke, and choose an output directory. The
+native viewer opens with matching source frames, the model and swing data. Each run creates a new
+bundle, so you can compare different windows and regions.
+
+You can also reconstruct directly from an original recording or a prepared clip:
+
+```bash
+python run.py reconstruct path/to/serve.mov --impact-frame 127 --stroke serve
+```
+
+The impact frame is zero-based within the supplied file. Prefer the original
+recording when a merged clip has a cut near the stroke. Use `--before` and
+`--after` for seconds around impact (one second each by default, ten seconds
+total maximum), `--output` for the parent folder, and optionally
+`--player-box 0.2 0.1 0.8 0.95` for a fixed crop in normalized left, top,
+right, bottom order. The box must isolate the same player throughout the window.
+
+- `player.glb` is an articulated human mannequin posed from the fitted landmarks. Import it into
+  a glTF 2.0 viewer or Blender to rotate it and play its animation.
+- With the optional CLI flag `--export-html`, the bundle also includes `replay.html`, which shows synchronized source frames and the orbitable reconstruction
+  using the same mannequin as the download. Switch **3D view** to **Tracked joints** to inspect the pose. The surface uses generic proportions. The replay includes slow motion, arm selection, a 250 ms wrist trail, and a scrub-linked
+  measurement plot. Finger detections appear on the source recording.
+- `pose.npz` keeps frame indices, timestamps, all 33 image and world landmarks,
+  joint visibility, filtered and fitted world landmarks, raw image-space hand
+  estimates (21 per hand), per-hand acceptance masks, and the image projection
+  used in the fit. Hand depth is local to the wrist.
+- `kinematics.csv` has one row per source frame. It includes bilateral knee flexion and quality, pelvis and shoulder headings about camera Y, signed shoulder–hip
+  separation about the trunk axis, upper-arm azimuth and elevation, elbow
+  flexion (zero at extension), and both wrists’ image positions, hip-relative
+  trajectories and speeds. 3D wrist axes are camera right, up, and toward the
+  camera. Speed uses consecutive timestamps. Blank cells mark unavailable
+  estimates. Wrist quality distinguishes missing joints from unusual segment
+  lengths (over 30% from the clip median).
+- `metadata.json` records the source, region, impact frame, model version, timing
+  basis, and coordinate conventions. Image coordinates refer to the full frame.
+
+The detailed pass runs MediaPipe Holistic on the original player crop. It fits
+the body toward visible image points under a weak-perspective camera and softly
+constrains anatomical link lengths to their clip medians. Hand wrists contribute
+image evidence only when they agree spatially with an unambiguous body wrist.
+These are modeling assumptions. A closer image fit cannot establish depth accuracy. Existing feature CSVs still serve rally detection. In 3D
+the hips define the measurement origin. For a stroke with continuous court contact,
+the replay and GLB place the lowest visible shoe surface at floor height. The other foot
+can lift. An unresolved foot position is labeled in the replay. For a jump or unknown
+contact, uncheck the foot-contact option in Studio or pass `--footwork unconstrained`
+to keep the display hip-relative. The archive includes the vertical display offset
+and support foot for each frame (−1 unresolved, 0 left, 1 right). Playback interpolates
+position, rotation and size between adjacent observations. Pausing and frame stepping
+show the recorded poses. Depth is estimated from one camera. During occlusions, a second detector tracks backward from the end of the stroke.
+The reconstruction checks player identity, left/right assignment and segment lengths.
+For elbows and wrists it also follows image patches through nearby frames. Short
+remaining gaps use motion on both sides of the gap in torso coordinates. A visible
+wrist can constrain the elbow bend. At a clip edge, a damped prediction can continue for up to 0.22 seconds when both
+trackers agree with it in the image. Unsupported long gaps and lost subjects remain unresolved.
+
+The replay shows reconstructed portions of a movement curve with a dashed line.
+Select **Reconstructed path** on the video to compare the projected joints against
+the source. Use **trajectory.csv** for the reconstructed curves and per-joint source
+labels. **kinematics.csv** and coaching findings retain the original measurement
+gates. The pose archive includes the reverse detector output, arm image cues,
+`trajectory_world` in hip-relative detector coordinates and `trajectory_status`
+per joint (0 unavailable, 1 forward fit, 2 reverse fit, 3 temporal estimate,
+4 image-guided estimate, 5 boundary prediction). The marked frame is a user annotation.
+
+### Reviewing serves and forehands
+
+In a portable review exported with `--export-html`, open **Mark evidence and compare strokes**.
+Scrub to a source frame, select an event, then press **Mark event**. Click the
+recording for a position mark. The contact mark uses the impact frame selected
+during reconstruction. If contact spans an uncertain interval, mark its earliest
+and latest plausible frames. Contact-dependent results are withheld while that
+interval is unresolved. Use the frame buttons beside a finding to inspect its
+evidence.
+
+- **Serve.** Mark the beginning of loading before the knees reach their deepest
+  bend. Each leg gets a flexion excursion and extension time only for an intact
+  phase. Select a front foot to label lead and rear legs. For a toss, confirm a
+  fixed camera and mark the setup front foot plus the ball at release, apex and
+  contact. Offsets are image-plane right/up distances in percent of frame width.
+- **Forehand.** Mark ready and end of preparation, select the hitting hand, and
+  confirm a fixed, level camera before using camera Y as vertical. The summary
+  reports each segment’s signed turn and time of peak forward rotation. Peaks
+  near a gap/boundary, broad peaks, and timing differences within sampling
+  uncertainty can remain unresolved. For projected spacing and approach angle,
+  mark the ball at contact and the same racket-tip point twice in the last 150 ms.
+- **Repeated strokes.** Enter player, camera setup ID (same position, zoom and
+  framing), stance, hand and target, plus serve type, serving side and front foot
+  for serves. Record the observed outcome. **Download review** saves the evidence
+  and computed summary in JSON. **Load reviews** restores evidence for this shot
+  or compares distinct strokes of the same type. A matched serve group reports
+  median and median absolute deviation (MAD). Repeatability requires at least two
+  distinct matched marked serves. Re-import comparison files after reopening.
+- Manual annotations are separate from model output. The browser remembers this
+  shot’s marks when local storage is available. Use the JSON export for a portable
+  copy. Previously generated replays remain usable; reconstruct again to get
+  the new review tools. The Studio window selectors let you include preparation
+  and loading before impact.
+
+These are descriptive estimates. Validating angles, depth and event timing for
+coaching still requires independent reviewer marks and calibrated reference
+recordings. See the [movement roadmap](ROADMAP.md#tennis-movement-analysis--serve-and-forehand).
 
 ## Configuration
 

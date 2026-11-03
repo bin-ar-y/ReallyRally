@@ -167,11 +167,15 @@ class StudioController:
 
     # -- helpers for later phases ----------------------------------------
 
-    def run_job(self, target: Callable, *args) -> None:
+    def run_job(self, target: Callable, *args, **kwargs) -> None:
         """Run a background job, posting ('job-done', result) or an error."""
+        if self._job_thread and self._job_thread.is_alive():
+            self._notify("warning", "Busy", "A job is already running.")
+            return
+        self.log("Building 3D reconstruction…")
         def _runner():
             try:
-                result: List = target(*args)
+                result = target(*args, **kwargs)
                 self.post("job-done", result)
             except Exception as exc:
                 self._notify("error", "Job failed", str(exc))
