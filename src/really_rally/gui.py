@@ -7,6 +7,7 @@ import queue
 import subprocess
 import sys
 import threading
+from pathlib import Path
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -17,6 +18,8 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from really_rally.processors.base import TennisRallyProcessor
 from really_rally.processors.serve import ServePracticeProcessor
 from really_rally.processors.feed import FeedPracticeProcessor
+from really_rally.studio.movement_panel import MovementPanel
+from really_rally.core.session_motion import video_replays, write_replay_index
 from really_rally.utils.media_io import get_video_date, probe_video
 from really_rally.utils.subprocesses import ProcessingCancelled
 
@@ -48,6 +51,9 @@ class ProcessingRequest:
     output_dir: str
     mode: str
     generate_plot: bool
+    generate_motion: bool = True
+    footwork: str = "supported"
+    movement_only: bool = False
 
 
 class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -76,8 +82,11 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self._started_at = None
         self._progress = 0.0
         self._result_path = None
+        self._motion_index = None
         self.processing_mode = tk.StringVar(value=MODES[0])
         self.plot_var = tk.BooleanVar(value=True)
+        self.motion_var = tk.BooleanVar(value=True)
+        self.planted_var = tk.BooleanVar(value=True)
 
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self.drop_files)
@@ -89,6 +98,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         self.create_widgets()
+        self.show_workspace("Video analysis")
         self._poll_ui_queue()
 
     def _label(self, parent, text, size=13, color=TEXT, **kwargs):
@@ -108,10 +118,20 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=28, pady=(24, 20))
         self._label(header, "ReallyRally", size=32).pack(side="left")
-        self._label(header, "YOUR PRACTICE, IN FOCUS", size=11, color=ACCENT).pack(side="left", padx=22)
+        self.navigation = ctk.CTkSegmentedButton(header,values=["Video analysis","Movement analysis"],
+                                                command=self.show_workspace,
+                                                selected_color="#37604B",selected_hover_color="#467758")
+        self.navigation.pack(side="left",padx=22)
+        menu = tk.Menu(self)
+        workspaces = tk.Menu(menu,tearoff=False)
+        for title in ("Video analysis","Movement analysis"):
+            workspaces.add_command(label=title,command=lambda name=title:self.show_workspace(name))
+        menu.add_cascade(label="Analysis",menu=workspaces)
+        tk.Tk.configure(self,menu=menu)
         self._label(header, "LOCAL  /  PRIVATE", size=11, color=MUTED).pack(side="right")
 
         content = ctk.CTkFrame(self, fg_color="transparent")
+        self.video_workspace = content
         content.grid(row=1, column=0, sticky="nsew", padx=28)
         content.grid_columnconfigure(0, weight=3)
         content.grid_columnconfigure(1, weight=2, minsize=320)
@@ -169,10 +189,19 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             fg_color=ACCENT, hover_color=ACCENT_HOVER, checkmark_color=BG,
             border_color=MUTED, text_color=TEXT, font=ctk.CTkFont(family="Avenir Next", size=13))
         self.chk_plot.pack(anchor="w", padx=24, pady=(0, 6))
-        self._label(settings, "Your original videos stay untouched.", size=11, color=MUTED,
-                    anchor="w").pack(fill="x", padx=22, pady=(0, 10))
+        self.chk_motion = ctk.CTkCheckBox(
+            settings, text="Build animated 3D replays", variable=self.motion_var, command=self._set_controls,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, checkmark_color=BG,
+            border_color=MUTED, text_color=TEXT, font=ctk.CTkFont(family="Avenir Next", size=13))
+        self.chk_motion.pack(anchor="w", padx=24, pady=(0, 6))
+        self.chk_planted = ctk.CTkCheckBox(
+            settings, text="Keep one foot on the court", variable=self.planted_var,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, checkmark_color=BG,
+            border_color=MUTED, text_color=MUTED, font=ctk.CTkFont(family="Avenir Next", size=12))
+        self.chk_planted.pack(anchor="w", padx=40, pady=(0, 10))
 
         action = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=16, border_width=1, border_color=BORDER)
+        self.video_actions = action
         action.grid(row=2, column=0, sticky="ew", padx=28, pady=(18, 0))
         action.grid_columnconfigure(0, weight=1)
         status_row = ctk.CTkFrame(action, fg_color="transparent")
@@ -201,21 +230,57 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_stop.pack(side="left", padx=10)
         self.btn_open_results = self._button(buttons, "Open results", self.open_results, width=130, state="disabled")
         self.btn_open_results.pack(side="right")
+        self.btn_open_replays = self._button(buttons, "Open 3D replays", self.open_replays, width=145, state="disabled")
+        self.btn_open_replays.pack(side="right", padx=8)
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=3, column=0, sticky="ew", padx=28, pady=12)
         self._label(footer, "Less footage. More tennis.", size=12, color=MUTED).pack(side="left")
         self.btn_quit = self._button(footer, "Quit", self.request_quit, width=80)
         self.btn_quit.pack(side="right")
+        self.movement = MovementPanel(self, analyze=self.analyze_movement, stop=self.stop_processing)
         self._set_controls()
+
+    def show_workspace(self,name):
+        self.navigation.set(name)
+        if name=="Movement analysis":
+            self.video_workspace.grid_remove()
+            self.video_actions.grid_remove()
+            self.movement.grid(row=1,column=0,rowspan=2,sticky="nsew",padx=22)
+            self.movement.active = True
+            self.movement.invalidate()
+        else:
+            self.movement.suspend()
+            self.movement.grid_remove()
+            self.video_workspace.grid()
+            self.video_actions.grid()
+
+    def analyze_movement(self,paths=None):
+        if self._busy() or self._close_requested:
+            return
+        if paths is None:
+            paths = filedialog.askopenfilenames(parent=self,title="Analyze movement in recordings",
+                    filetypes=[("Video files","*.mp4 *.mov *.avi *.mkv *.m4v *.MP4 *.MOV *.AVI *.MKV *.M4V")])
+        if not paths:
+            return
+        destination = filedialog.askdirectory(parent=self,title="Save movement session",initialdir=self.output_dir)
+        if not destination:
+            return
+        mode = dict(zip(("Rallies","Serves","Multiball"),MODES))[self.movement.mode.get()]
+        request = ProcessingRequest(tuple(paths),destination,mode,False,True,
+                                    "supported" if self.movement.planted.get() else "unconstrained",True)
+        self._start_request(request)
 
     def _busy(self):
         return self.is_processing or self.is_loading
 
     def _set_controls(self):
         state = "disabled" if self._busy() or self._close_requested else "normal"
-        for widget in [self.btn_add_files, self.btn_select_output, self.chk_plot, *self.mode_buttons]:
+        for widget in [self.btn_add_files, self.btn_select_output, self.chk_plot, self.chk_motion, *self.mode_buttons]:
             widget.configure(state=state)
+        self.movement.set_busy(self._busy() or self._close_requested)
+        self.chk_planted.configure(state=state if self.motion_var.get() else "disabled")
+        self.btn_open_replays.configure(state=state if self._motion_index else "disabled")
         self.btn_clear_files.configure(state=state if self.video_files else "disabled")
         self.btn_process.configure(state=state if self.video_files else "disabled")
 
@@ -233,7 +298,16 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         if self._busy() or self._close_requested or not event.data:
             return
         # Tk's own list parser handles spaces, braces and non-ASCII filenames.
-        self._add_files(self.tk.splitlist(event.data))
+        paths = self.tk.splitlist(event.data)
+        if self.navigation.get()=="Movement analysis":
+            if len(paths)==1 and Path(paths[0]).is_dir():
+                self.movement.load_folder(paths[0])
+            elif len(paths)==1 and Path(paths[0]).suffix.lower()==".json":
+                self.movement.load_session(paths[0])
+            else:
+                self.analyze_movement([p for p in paths if Path(p).suffix.lower() in VIDEO_EXTENSIONS])
+        else:
+            self._add_files(paths)
 
     def select_files(self):
         if self._busy() or self._close_requested:
@@ -315,6 +389,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
     def _set_status(self, title, detail, color=TEXT):
         self.lbl_progress_text.configure(text=title, text_color=color)
         self.lbl_status.configure(text=detail)
+        self.movement.job_note.configure(text=f"{title}  ·  {detail}",text_color=color)
 
     # All worker messages are consumed here, in bounded batches so a busy worker
     # cannot starve clicks, repaints, the progress animation or the quit flow.
@@ -398,6 +473,7 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 return  # don't overwrite the acknowledgement with a late worker update
             _, text, progress = msg
             self.lbl_status.configure(text=text)
+            self.movement.job_note.configure(text=text,text_color=MUTED)
             if progress is not None:
                 self._progress = max(self._progress, min(0.99, max(0.0, progress)))
                 self.progress_bar.set(self._progress)
@@ -406,6 +482,10 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._pending_rows.extend(msg[1])
             self._load_note = msg[2]
             self._pending_result = ("files",)
+        elif kind == "motion_index":
+            self._motion_index = msg[1]
+            if not self._close_requested:
+                self.movement.load_session(msg[1])
         elif kind == "finished":
             self._pending_result = msg
         elif kind in {"info", "warning", "error"}:
@@ -419,11 +499,15 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
             return
         # Snapshot every Tk variable BEFORE the thread starts.
         request = ProcessingRequest(tuple(self.video_files), self.output_dir,
-                                    self.processing_mode.get(), self.plot_var.get())
+                                    self.processing_mode.get(), self.plot_var.get(), self.motion_var.get(),
+                                    "supported" if self.planted_var.get() else "unconstrained")
+        self._start_request(request)
+
+    def _start_request(self,request):
         self.is_processing = True
         self.stop_event.clear()
         self._pending_result = None
-        self._result_path = None
+        self._result_path = self._motion_index = None
         self._progress = 0.0
         self._started_at = time.monotonic()
         self._set_controls()
@@ -485,9 +569,15 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
         except OSError as exc:
             self._set_status("Could not open results", f"{self._result_path}\n{exc}", ERROR)
 
+    def open_replays(self):
+        if self._motion_index:
+            self.show_workspace("Movement analysis")
+            self.movement.load_session(self._motion_index)
+
     def run_processing(self, request):
         """Worker entry point. No Tk calls, including StringVar/BooleanVar.get()."""
         processor = None
+        replays = []
         result = ("finished", "stopped", "Processing stopped", "Completed clips are kept. You can start again or quit.", None)
         results_dir = None
         try:
@@ -515,13 +605,18 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     # Leave the final 6% for batch merging and metadata.
                     self.log(f"[{_i+1}/{total}] {_name}: {message}", 0.94 * (_i + fraction) / total)
 
+                extraction_share = .55 if request.generate_motion else 1.0
+
+                def extraction_progress(fraction, message, scale=extraction_share, report=progress):
+                    report(scale*fraction, message)
+
                 processor = processor_class(video_path, request.output_dir, keep_clips=True,
-                                            progress_callback=progress, stop_event=self.stop_event,
+                                            progress_callback=extraction_progress, stop_event=self.stop_event,
                                             target_format=target_format, generate_plot=request.generate_plot)
                 try:
                     if self.stop_event.is_set():
                         return
-                    clips = processor.process_video()
+                    clips = processor.process_video(export_clips=False) if request.movement_only else processor.process_video()
                     all_clip_paths.extend(clips)
                     manifest_rows.extend(processor.exported_clip_rows)
                     if mode == MODES[1]:
@@ -530,9 +625,19 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                     processor.cap.release()
                 if self.stop_event.is_set():
                     break
+                if request.generate_motion:
+                    def motion_progress(fraction, message, scale=extraction_share, report=progress):
+                        report(scale + (1-scale)*fraction, message)
+
+                    replays.extend(video_replays(processor, request.footwork, motion_progress, self.stop_event))
                 progress(1, "Video finished")
 
             if self.stop_event.is_set():
+                return
+            if request.movement_only:
+                result = ("finished","success","Movement analysis ready",
+                          "Choose a stroke in Movement analysis." if replays else "Try a different session type or a shorter stroke clip.",
+                          results_dir if os.path.isdir(results_dir) else None)
                 return
             self.log("Saving the batch manifest…", 0.94)
             TennisRallyProcessor.write_clip_manifest(os.path.join(results_dir, "manifest.csv"), manifest_rows)
@@ -567,6 +672,23 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
                 processor.cap.release()
             if self.stop_event.is_set():
                 result = ("finished", "stopped", "Processing stopped", "Completed clips are kept. You can start again or quit.", results_dir if results_dir and os.path.isdir(results_dir) else None)
+            if replays:
+                count = sum(entry.bundle is not None for entry in replays)
+                status, title, detail = result[1:4]
+                motion_note = f"{count} 3D replay{'' if count == 1 else 's'} saved."
+                if count != len(replays):
+                    motion_note += f" {len(replays)-count} unavailable; select the stroke for details."
+                try:
+                    index = write_replay_index(results_dir, replays)
+                    self._ui_queue.put(("motion_index", index))
+                except (OSError, ValueError) as exc:
+                    motion_note += f" Could not save the session list: {exc}"
+                if status == "success" and not request.movement_only and not all_clip_paths and count:
+                    title = "3D replay ready · no clips detected"
+                    detail = "Open Movement analysis to review the stroke."
+                result = ("finished", status, title, motion_note+" "+detail, result[4])
+            elif request.generate_motion and result[1] == "success":
+                result = (*result[:3], "No eligible strokes for 3D reconstruction. "+result[3], result[4])
             self._ui_queue.put(result)
 
     @staticmethod
@@ -586,7 +708,17 @@ class RallyExtractorGUI(ctk.CTk, TkinterDnD.DnDWrapper):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="ReallyRally desktop")
+    parser.add_argument("--movement", type=Path, help="Open a saved movement session JSON or stroke folder")
+    args = parser.parse_args()
     app = RallyExtractorGUI()
+    if args.movement is not None:
+        app.show_workspace("Movement analysis")
+        if args.movement.is_dir():
+            app.movement.load_folder(args.movement)
+        else:
+            app.movement.load_session(args.movement)
     app.mainloop()
 
 

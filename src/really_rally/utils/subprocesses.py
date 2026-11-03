@@ -8,6 +8,11 @@ class ProcessingCancelled(Exception):
     """The user requested cancellation of a media operation."""
 
 
+def check_cancelled(stop_event):
+    if stop_event is not None and stop_event.is_set():
+        raise ProcessingCancelled()
+
+
 def run_media_command(command, *, stop_event=None, timeout):
     """Like subprocess.run, but observe cancellation while draining stderr.
 

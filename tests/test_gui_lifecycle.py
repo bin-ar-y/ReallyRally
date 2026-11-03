@@ -41,6 +41,8 @@ class Harness:
         self._worker = None
         self._pending_result = None
         self._pending_rows = deque()
+        self._motion_index = None
+        self.movement = Mock()
         self._result_path = None
         self._progress = 0
         self._started_at = None
@@ -49,8 +51,10 @@ class Harness:
         self._ui_queue = queue.Queue()
         self.processing_mode = SimpleNamespace(get=lambda: gui.MODES[0])
         self.plot_var = SimpleNamespace(get=lambda: True)
+        self.motion_var = SimpleNamespace(get=lambda: True)
+        self.planted_var = SimpleNamespace(get=lambda: True)
         for name in ("btn_add_files", "btn_clear_files", "btn_select_output", "chk_plot",
-                     "btn_process", "btn_stop", "btn_open_results", "btn_quit", "lbl_elapsed",
+                     "chk_motion", "chk_planted", "btn_open_replays", "btn_process", "btn_stop", "btn_open_results", "btn_quit", "lbl_elapsed",
                      "lbl_progress_text", "lbl_status", "progress_bar", "activity_bar"):
             setattr(self, name, Widget())
         self.mode_buttons = [Widget() for _ in gui.MODES]
@@ -60,7 +64,7 @@ class Harness:
 
 
 for method in ("_busy", "_set_controls", "_set_status", "log", "_notify", "_poll_ui_queue",
-               "_handle_ui_message", "start_processing_thread", "stop_processing", "request_quit",
+               "_handle_ui_message", "start_processing_thread", "_start_request", "stop_processing", "request_quit",
                "_destroy_window", "run_processing", "reset_ui", "_validate_files"):
     setattr(Harness, method, getattr(gui.RallyExtractorGUI, method))
 Harness._serve_summary = staticmethod(gui.RallyExtractorGUI._serve_summary)
@@ -92,6 +96,8 @@ def test_start_snapshots_options_and_acknowledges_before_worker_runs(app):
     assert request.videos == ("/videos/practice.mov",)
     assert request.mode == gui.MODES[0]
     assert request.generate_plot is True
+    assert request.generate_motion is True and request.footwork == "supported"
+    assert app.chk_motion.options["state"] == "disabled"
     assert app.activity_bar.running
     assert app.btn_stop.options["state"] == "normal"
     assert all(button.options["state"] == "disabled" for button in app.mode_buttons)
@@ -178,10 +184,11 @@ def test_file_loading_filters_duplicates_and_unsupported_files_off_thread(app, t
 
 
 @pytest.mark.parametrize("mode", gui.MODES)
-def test_worker_uses_snapshot_releases_video_and_never_reads_tk(app, monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("motion", [True, False])
+def test_worker_uses_snapshot_releases_video_and_never_reads_tk(app, monkeypatch, tmp_path, mode, motion):
     def no_tk():
         raise AssertionError("Worker accessed Tk")
-    app.processing_mode.get = app.plot_var.get = no_tk
+    app.processing_mode.get = app.plot_var.get = app.motion_var.get = app.planted_var.get = no_tk
     built = []
 
     class Processor:
@@ -209,10 +216,22 @@ def test_worker_uses_snapshot_releases_video_and_never_reads_tk(app, monkeypatch
         monkeypatch.setattr(gui, name, Processor)
     monkeypatch.setattr(gui, "probe_video", lambda _: {"width": 640, "height": 480, "fps": 30})
     monkeypatch.setattr(gui, "get_video_date", lambda _: "103126")
-    request = gui.ProcessingRequest(("practice.mov",), str(tmp_path), mode, False)
+    replay = tmp_path / "replay.html"
+    from really_rally.core.session_motion import ReplayResult
+    build = Mock(return_value=[ReplayResult("practice.mov", 12, "Full clip", replay)])
+    monkeypatch.setattr(gui, "video_replays", build)
+    monkeypatch.setattr(gui, "write_replay_index", Mock(return_value=replay))
+    request = gui.ProcessingRequest(("practice.mov",), str(tmp_path), mode, False, motion, "unconstrained")
     app.run_processing(request)
     messages = list(app._ui_queue.queue)
     assert messages[-1][:2] == ("finished", "success")
     assert len(built) == 1  # no extra model/decoder for the batch merge
     assert built[0].options["generate_plot"] is False
     assert built[0].cap.release.called
+    if motion:
+        build.assert_called_once()
+        assert build.call_args.args[:2] == (built[0], "unconstrained")
+        assert ("motion_index", replay) in messages
+    else:
+        build.assert_not_called()
+        assert not any(msg[0] == "motion_index" for msg in messages)

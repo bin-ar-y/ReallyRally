@@ -58,10 +58,11 @@ Repository = "https://github.com/bin-ar-y/really-rally"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["really_rally", "really_rally.core", "really_rally.processors", "really_rally.utils"]
+packages = ["really_rally", "really_rally.core", "really_rally.processors", "really_rally.utils", "really_rally.studio"]
 
 [tool.setuptools.package-data]
 really_rally = ["py.typed"]
+"really_rally.core" = ["stroke_replay.html", "shot_review.js", "mannequin.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

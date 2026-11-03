@@ -104,6 +104,24 @@ def mask_to_indices(mask) -> List[Tuple[int, int]]:
     return [(int(s), int(e)) for s, e in zip(starts, ends)]
 
 
+def _stroke_peaks(records, mask, fps):
+    """Keep one source-frame arm-energy peak per distinct candidate burst."""
+    peaks = []
+    for start, end in mask_to_indices(mask):
+        rows = [r for r in records[start:end] if "frame" in r or "timestamp" in r]
+        if not rows:
+            continue
+        peak = max(rows, key=lambda row: row.get("arm_energy", 0))
+        frame = int(peak["frame"]) if "frame" in peak else round(peak["timestamp"] * fps)
+        energy = peak.get("arm_energy", 0)
+        if peaks and frame - peaks[-1][0] < .5 * fps:
+            if energy > peaks[-1][1]:
+                peaks[-1] = (frame, energy)
+        else:
+            peaks.append((frame, energy))
+    return tuple(frame for frame, _ in peaks)
+
+
 @dataclass
 class AdaptiveState:
     """Cross-segment detector state for one video.
@@ -238,6 +256,13 @@ class RallyAnalyzer:
         if trailing is not None:
             final_segments.append(trailing)
 
+        frames = np.array([row.get("frame", 0) for row in frame_data])
+        for segment in final_segments:
+            left = frames.searchsorted(segment.start_frame)
+            right = frames.searchsorted(segment.end_frame, side="right")
+            rows = frame_data[left:right]
+            segment.stroke_frames = _stroke_peaks(rows, [r["candidate"] for r in rows], config.fps)
+
         self.state.last_segment_end_frame = frame_data[-1].get("frame", 0)
         return final_segments
 
@@ -299,6 +324,7 @@ class ServeAnalyzer:
                 start_time=event.start_time,
                 end_time=event.end_time,
                 score=event.score,
+                stroke_frames=(int(frame_data[event.contact_idx].get("frame", round(event.contact_time * self.config.fps))),),
             )
             for event in events
         ]
@@ -428,6 +454,7 @@ class FeedAnalyzer:
                 start_time=t_start,
                 end_time=t_end,
                 score=float(np.max(segment_arms)),
+                stroke_frames=_stroke_peaks(frame_data[start_idx:end_idx], valid_baseline | valid_volley, config.fps),
             ))
 
         return final_segments

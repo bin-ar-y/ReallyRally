@@ -11,6 +11,9 @@ class RallySegment:
     # Per-channel evidence, populated by Pass 3 when object verification runs.
     evidence: Optional[object] = field(default=None, repr=False)
 
+    # Source-video frames for optional detailed stroke reconstruction.
+    stroke_frames: tuple = field(default=(), repr=False, compare=False)
+
     @property
     def duration(self):
         return self.end_time - self.start_time

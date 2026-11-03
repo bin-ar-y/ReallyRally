@@ -19,6 +19,7 @@ so a run can be examined without opening files individually.
 from __future__ import annotations
 
 import os
+from really_rally.studio.movement_panel import MovementPanel
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -58,6 +59,8 @@ class StudioApp(ctk.CTk):
 
         self.controller = StudioController()
         self.telemetry_view: Optional[TelemetryView] = None
+        self._impact_image = None
+        self._loaded_video = None
         self._photo = None  # keep a reference; Tk drops unreferenced images
         self._video_path: Optional[str] = None
 
@@ -103,6 +106,9 @@ class StudioApp(ctk.CTk):
                       command=self.select_video).pack(side="left", padx=4, pady=8)
         ctk.CTkButton(bar, text="Load telemetry…", width=130,
                       command=self.select_telemetry).pack(side="left", padx=4, pady=8)
+
+        ctk.CTkButton(bar, text="Reconstruct stroke…", width=135,
+                      command=self.reconstruct_stroke).pack(side="left", padx=4)
 
         self.lbl_file = ctk.CTkLabel(bar, text="no dataset loaded", anchor="w",
                                      text_color="gray70")
@@ -285,6 +291,24 @@ class StudioApp(ctk.CTk):
         # Auto-pair the sibling telemetry the pipeline writes next to it.
         self.controller.open_dataset(path, self._guess_telemetry(path))
 
+    def reconstruct_stroke(self):
+        from really_rally.core.reconstruction import reconstruct
+        from really_rally.studio.stroke_selection import choose_stroke
+
+        if self._impact_image is None or self._loaded_video != self._video_path:
+            messagebox.showinfo("Select an impact frame", "Open a video and scrub to the stroke first.")
+            return
+        self.controller.set_playing(False)
+        self.btn_play.configure(text="▶ Play")
+        frame, image = self._impact_image
+        path = self._loaded_video
+        selection = choose_stroke(self, image, frame)
+        if selection:
+            stroke, roi, before, after, footwork = selection
+            output = filedialog.askdirectory(title="Save the 3D reconstruction in…")
+            if output:
+                self.controller.run_job(reconstruct, path, output, frame, stroke, before, after, roi, footwork, portable_html=False)
+
     def select_telemetry(self) -> None:
         path = filedialog.askopenfilename(
             title="Select telemetry CSV",
@@ -322,8 +346,7 @@ class StudioApp(ctk.CTk):
     def _on_scrub(self, value) -> None:
         if not self.controller.video_meta:
             return
-        total = self.controller.video_meta.get("frame_count") or 0
-        self.controller.request_seek(int(float(value) * max(0, total - 1)))
+        self.controller.request_seek(round(float(value)))
 
     def _on_speed(self, label: str) -> None:
         self.controller.set_speed(float(label.rstrip("x")))
@@ -502,11 +525,22 @@ class StudioApp(ctk.CTk):
             self.lbl_status.configure(text=text)
         elif kind in ("info", "error", "warning"):
             getattr(messagebox, f"show{kind}")(msg[1], msg[2])
+        elif kind == "job-done":
+            folder = msg[1]
+            self.lbl_status.configure(text=f"3D reconstruction saved in {folder}")
+            window = ctk.CTkToplevel(self)
+            window.title("Movement analysis · ReallyRally")
+            window.geometry("1000x720")
+            panel = MovementPanel(window)
+            panel.pack(fill="both",expand=True)
+            panel.load_folder(folder)
         elif kind == "dataset":
             _, path, meta, repository = msg
             self._on_dataset_loaded(path, meta, repository)
 
     def _on_dataset_loaded(self, path: str, meta: dict, repository) -> None:
+        self._loaded_video = path
+        self._impact_image = None
         self.controller.video_meta = meta
         self.controller.repository = repository
         # Prefer what the results folder reported over re-deriving from the
@@ -726,8 +760,10 @@ class StudioApp(ctk.CTk):
         self.controller.current_frame = frame_idx
         fps = self.controller.video_meta.get("fps") or 30.0
 
+        source_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        self._impact_image = frame_idx, source_image
         self._photo = ctk.CTkImage(
-            light_image=Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)),
+            light_image=source_image,
             size=(image.shape[1], image.shape[0]))
         self.video_label.configure(image=self._photo, text="")
 

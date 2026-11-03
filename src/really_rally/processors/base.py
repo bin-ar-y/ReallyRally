@@ -46,6 +46,7 @@ class TennisRallyProcessor:
         if self.target_format is None:
             self.target_format = {'width': self.width, 'height': self.height, 'fps': self.fps}
 
+        self.detected_segments = []
         self.all_frame_metrics = []
 
         # Per-video artifacts are named after the source video. A batch run
@@ -429,12 +430,13 @@ class TennisRallyProcessor:
 
         self.print_output_manifest()
 
-    def process_video(self) -> List[str]:
+    def process_video(self, *, export_clips=True) -> List[str]:
         """
         Runs the extraction pipeline and returns a list of generated clip paths.
         Does NOT merge or cleanup.
         """
         
+        self.detected_segments = []
         # --- Pass 1: Motion Scan ---
         motion_segments = self.scan_motion_segments()
         
@@ -479,6 +481,10 @@ class TennisRallyProcessor:
             all_rally_segments = self.verify_candidate_windows(all_rally_segments)
 
         if self.stop_event and self.stop_event.is_set():
+            return []
+
+        self.detected_segments = all_rally_segments
+        if not export_clips:
             return []
 
         # Export Debug Data
